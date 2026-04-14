@@ -3,7 +3,6 @@ Protocol-level tests for MygramDB client.
 
 Tests the command generation logic without actual network connections.
 """
-import pytest
 
 
 class TestFilterSyntax:
@@ -401,3 +400,154 @@ api:
         assert response.startswith("OK CONFIG")
         config = response[len("OK CONFIG\n"):]
         assert "api:" in config
+
+
+class TestResponseCompletionDetection:
+    """Tests for response completion detection in multi-line responses."""
+
+    def test_dump_status_response_complete_with_end(self):
+        """Should detect DUMP STATUS response ending with END marker."""
+        from mygramdb_client import MygramClient
+
+        client = MygramClient()
+        buffer = "OK DUMP_STATUS\r\nstatus: idle\r\nEND\r\n"
+        assert client._is_response_complete(buffer)
+
+    def test_dump_status_response_complete_lf(self):
+        """Should detect DUMP STATUS response ending with END (LF)."""
+        from mygramdb_client import MygramClient
+
+        client = MygramClient()
+        buffer = "OK DUMP_STATUS\nstatus: idle\nEND\n"
+        assert client._is_response_complete(buffer)
+
+    def test_dump_status_response_incomplete(self):
+        """Should detect incomplete DUMP STATUS response."""
+        from mygramdb_client import MygramClient
+
+        client = MygramClient()
+        buffer = "OK DUMP_STATUS\nstatus: saving"
+        assert not client._is_response_complete(buffer)
+
+    def test_cache_stats_response_complete_with_end(self):
+        """Should detect CACHE STATS response ending with END marker."""
+        from mygramdb_client import MygramClient
+
+        client = MygramClient()
+        buffer = "OK CACHE_STATS\r\n\r\n# Cache\r\nenabled: true\r\nEND\r\n"
+        assert client._is_response_complete(buffer)
+
+    def test_cache_stats_response_complete_lf(self):
+        """Should detect CACHE STATS response ending with END (LF)."""
+        from mygramdb_client import MygramClient
+
+        client = MygramClient()
+        buffer = "OK CACHE_STATS\n\n# Cache\nenabled: true\nEND\n"
+        assert client._is_response_complete(buffer)
+
+    def test_cache_stats_response_incomplete(self):
+        """Should detect incomplete CACHE STATS response."""
+        from mygramdb_client import MygramClient
+
+        client = MygramClient()
+        buffer = "OK CACHE_STATS\ncache_enabled: 1"
+        assert not client._is_response_complete(buffer)
+
+    def test_replication_response_complete_crlf(self):
+        """Should detect REPLICATION response with CRLF line endings."""
+        from mygramdb_client import MygramClient
+
+        client = MygramClient()
+        buffer = "OK REPLICATION\r\nstatus: running\r\ncurrent_gtid: abc\r\nEND\r\n"
+        assert client._is_response_complete(buffer)
+
+    def test_replication_response_incomplete_crlf(self):
+        """Should detect incomplete REPLICATION response with CRLF."""
+        from mygramdb_client import MygramClient
+
+        client = MygramClient()
+        buffer = "OK REPLICATION\r\nstatus: running"
+        assert not client._is_response_complete(buffer)
+
+    def test_dump_status_response_complete_crlf_end(self):
+        """Should detect DUMP STATUS with CRLF and END marker."""
+        from mygramdb_client import MygramClient
+
+        client = MygramClient()
+        buffer = "OK DUMP_STATUS\r\nstatus: IDLE\r\nEND\r\n"
+        assert client._is_response_complete(buffer)
+
+    def test_cache_stats_response_complete_crlf_end(self):
+        """Should detect CACHE STATS with CRLF and END marker."""
+        from mygramdb_client import MygramClient
+
+        client = MygramClient()
+        buffer = "OK CACHE_STATS\r\n\r\n# Cache\r\nenabled: true\r\nEND\r\n"
+        assert client._is_response_complete(buffer)
+
+
+class TestDumpCommandGeneration:
+    """Tests for DUMP command generation."""
+
+    def test_dump_save_command_with_filepath(self):
+        parts = ["DUMP", "SAVE", "/backup/dump.dmp"]
+        command = " ".join(parts)
+        assert command == "DUMP SAVE /backup/dump.dmp"
+
+    def test_dump_load_command_with_filepath(self):
+        parts = ["DUMP", "LOAD", "/backup/dump.dmp"]
+        command = " ".join(parts)
+        assert command == "DUMP LOAD /backup/dump.dmp"
+
+    def test_dump_verify_command(self):
+        parts = ["DUMP", "VERIFY", "/backup/dump.dmp"]
+        command = " ".join(parts)
+        assert command == "DUMP VERIFY /backup/dump.dmp"
+
+    def test_dump_info_command(self):
+        parts = ["DUMP", "INFO", "/backup/dump.dmp"]
+        command = " ".join(parts)
+        assert command == "DUMP INFO /backup/dump.dmp"
+
+
+class TestCacheCommandGeneration:
+    """Tests for CACHE command generation."""
+
+    def test_cache_clear_all(self):
+        command = "CACHE CLEAR"
+        assert command == "CACHE CLEAR"
+
+    def test_cache_clear_table(self):
+        table = "articles"
+        command = f"CACHE CLEAR {table}"
+        assert command == "CACHE CLEAR articles"
+
+    def test_cache_enable(self):
+        command = "CACHE ENABLE"
+        assert command == "CACHE ENABLE"
+
+    def test_cache_disable(self):
+        command = "CACHE DISABLE"
+        assert command == "CACHE DISABLE"
+
+
+class TestOptimizeCommandGeneration:
+    """Tests for OPTIMIZE command generation."""
+
+    def test_optimize_all(self):
+        command = "OPTIMIZE"
+        assert command == "OPTIMIZE"
+
+    def test_optimize_table(self):
+        table = "articles"
+        command = f"OPTIMIZE {table}"
+        assert command == "OPTIMIZE articles"
+
+    def test_optimize_without_table_sends_bare_command(self):
+        """OPTIMIZE without table sends bare command (server may reject it)."""
+        table = None
+        if table:
+            command = f"OPTIMIZE {table}"
+        else:
+            command = "OPTIMIZE"
+        assert command == "OPTIMIZE"

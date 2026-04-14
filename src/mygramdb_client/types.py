@@ -9,6 +9,7 @@ class ClientConfig:
 
     host: str = "127.0.0.1"
     port: int = 11016
+    socket_path: str = ""
     timeout: float = 5.0
     recv_buffer_size: int = 65536
     max_query_length: int = 128
@@ -51,6 +52,10 @@ class DebugInfo:
     after_filters: int = 0
     final: int = 0
     optimization: str = ""
+    sort: Optional[str] = None
+    cache: Optional[str] = None
+    cache_age_ms: Optional[float] = None
+    cache_saved_ms: Optional[float] = None
     limit: Optional[int] = None
     offset: Optional[int] = None
 
@@ -108,6 +113,38 @@ class ReplicationStatus:
     running: bool = False
     gtid: str = ""
     status_str: str = ""
+
+
+@dataclass
+class DumpStatus:
+    """Status of a dump operation."""
+
+    status: str = ""
+    filepath: str = ""
+    tables_total: int = 0
+    tables_processed: int = 0
+    current_table: str = ""
+    elapsed_seconds: float = 0.0
+    save_in_progress: bool = False
+    load_in_progress: bool = False
+    result_filepath: str = ""
+    error: str = ""
+
+
+@dataclass
+class CacheStats:
+    """Cache statistics."""
+
+    enabled: bool = False
+    hits: int = 0
+    misses: int = 0
+    hit_rate: float = 0.0
+    current_entries: int = 0
+    memory_bytes: int = 0
+    evictions: int = 0
+    max_memory_mb: float = 0.0
+    current_memory_mb: float = 0.0
+    ttl_seconds: int = 0
 
 
 @dataclass

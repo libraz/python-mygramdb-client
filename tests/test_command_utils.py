@@ -145,3 +145,26 @@ class TestValidatePrimaryKey:
     def test_primary_key_with_control_char_raises_error(self):
         with pytest.raises(InputValidationError, match="contains invalid"):
             validate_primary_key("bad\x00key")
+
+
+class TestNewMethodInputValidation:
+    """Tests that new methods reject control characters in inputs."""
+
+    def test_filepath_with_control_char_rejected(self):
+        with pytest.raises(InputValidationError, match="contains invalid"):
+            ensure_safe_command_value("/path/\x00bad", "filepath")
+
+    def test_filepath_with_newline_rejected(self):
+        with pytest.raises(InputValidationError, match="contains invalid"):
+            ensure_safe_command_value("/path/\nbad", "filepath")
+
+    def test_filepath_valid_passes(self):
+        ensure_safe_command_value("/backup/dump-2024.dmp", "filepath")
+
+    def test_table_for_cache_clear_with_control_char_rejected(self):
+        with pytest.raises(InputValidationError, match="contains invalid"):
+            ensure_safe_command_value("table\r\nname", "table")
+
+    def test_table_for_optimize_with_control_char_rejected(self):
+        with pytest.raises(InputValidationError, match="contains invalid"):
+            ensure_safe_command_value("table\x00name", "table")

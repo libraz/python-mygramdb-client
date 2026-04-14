@@ -14,11 +14,13 @@ from .command_utils import (
 )
 from .errors import ConnectionError, ProtocolError, ServerError, TimeoutError
 from .types import (
+    CacheStats,
     ClientConfig,
     CountOptions,
     CountResponse,
     DebugInfo,
     Document,
+    DumpStatus,
     ReplicationStatus,
     SearchOptions,
     SearchResponse,
@@ -35,14 +37,10 @@ class MygramClient:
     querying MygramDB servers.
 
     Example usage:
-        client = MygramClient(ClientConfig(host='localhost', port=11016))
-        await client.connect()
-
-        result = await client.search('articles', 'hello world',
-                                     SearchOptions(limit=100))
-        print(f"Found {result.total_count} results")
-
-        await client.disconnect()
+        async with MygramClient(ClientConfig(host='localhost', port=11016)) as client:
+            result = await client.search('articles', 'hello world',
+                                         SearchOptions(limit=100))
+            print(f"Found {result.total_count} results")
     """
 
     def __init__(self, config: Optional[ClientConfig] = None):
@@ -57,9 +55,18 @@ class MygramClient:
         self._writer: Optional[asyncio.StreamWriter] = None
         self._connected = False
 
+    async def __aenter__(self) -> "MygramClient":
+        """Async context manager entry."""
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Async context manager exit."""
+        await self.disconnect()
+
     async def connect(self) -> None:
         """
-        Connect to MygramDB server.
+        Connect to MygramDB server via TCP or Unix socket.
 
         Raises:
             ConnectionError: If connection fails.
@@ -68,10 +75,16 @@ class MygramClient:
             return
 
         try:
-            self._reader, self._writer = await asyncio.wait_for(
-                asyncio.open_connection(self.config.host, self.config.port),
-                timeout=self.config.timeout,
-            )
+            if self.config.socket_path:
+                self._reader, self._writer = await asyncio.wait_for(
+                    asyncio.open_unix_connection(self.config.socket_path),
+                    timeout=self.config.timeout,
+                )
+            else:
+                self._reader, self._writer = await asyncio.wait_for(
+                    asyncio.open_connection(self.config.host, self.config.port),
+                    timeout=self.config.timeout,
+                )
             self._connected = True
         except asyncio.TimeoutError:
             raise TimeoutError("Connection timeout")
@@ -343,6 +356,126 @@ class MygramClient:
         if not response.startswith("OK"):
             raise ProtocolError(f"Failed to disable debug: {response}")
 
+    async def dump_save(self, filepath: str) -> str:
+        """
+        Save index dump to server-side file.
+
+        Args:
+            filepath: File path on the server to save the dump.
+
+        Returns:
+            File path where the dump is being saved.
+        """
+        ensure_safe_command_value(filepath, "filepath")
+        cmd = f"DUMP SAVE {filepath}" if filepath else "DUMP SAVE"
+        response = await self.send_command(cmd)
+        if response.startswith("OK DUMP_STARTED "):
+            return response[16:]
+        if response.startswith("OK DUMP_SAVED "):
+            return response[14:]
+        raise ProtocolError(f"Invalid DUMP SAVE response: {response}")
+
+    async def dump_load(self, filepath: str) -> None:
+        """
+        Load index from dump file.
+
+        Args:
+            filepath: File path on the server to load the dump from.
+        """
+        ensure_safe_command_value(filepath, "filepath")
+        cmd = f"DUMP LOAD {filepath}" if filepath else "DUMP LOAD"
+        response = await self.send_command(cmd)
+        if not response.startswith("OK"):
+            raise ProtocolError(f"Failed to load dump: {response}")
+
+    async def dump_status(self) -> DumpStatus:
+        """Get status of a dump operation."""
+        response = await self.send_command("DUMP STATUS")
+        return self._parse_dump_status_response(response)
+
+    async def dump_verify(self, filepath: str) -> str:
+        """
+        Verify integrity of a dump file.
+
+        Args:
+            filepath: File path of the dump to verify.
+
+        Returns:
+            Verification result message.
+        """
+        ensure_safe_command_value(filepath, "filepath")
+        response = await self.send_command(f"DUMP VERIFY {filepath}")
+        if not response.startswith("OK"):
+            raise ProtocolError(f"Failed to verify dump: {response}")
+        return response
+
+    async def dump_info(self, filepath: str) -> str:
+        """
+        Get metadata about a dump file.
+
+        Args:
+            filepath: File path of the dump.
+
+        Returns:
+            Dump metadata string.
+        """
+        ensure_safe_command_value(filepath, "filepath")
+        response = await self.send_command(f"DUMP INFO {filepath}")
+        if not response.startswith("OK"):
+            raise ProtocolError(f"Failed to get dump info: {response}")
+        return response
+
+    async def cache_stats(self) -> CacheStats:
+        """Get cache statistics."""
+        response = await self.send_command("CACHE STATS")
+        return self._parse_cache_stats_response(response)
+
+    async def cache_clear(self, table: Optional[str] = None) -> None:
+        """
+        Clear query cache.
+
+        Args:
+            table: If specified, only clear cache for this table.
+                   If None, clear all caches.
+        """
+        if table:
+            ensure_safe_command_value(table, "table")
+            cmd = f"CACHE CLEAR {table}"
+        else:
+            cmd = "CACHE CLEAR"
+        response = await self.send_command(cmd)
+        if not response.startswith("OK"):
+            raise ProtocolError(f"Failed to clear cache: {response}")
+
+    async def cache_enable(self) -> None:
+        """Enable query cache."""
+        response = await self.send_command("CACHE ENABLE")
+        if not response.startswith("OK"):
+            raise ProtocolError(f"Failed to enable cache: {response}")
+
+    async def cache_disable(self) -> None:
+        """Disable query cache."""
+        response = await self.send_command("CACHE DISABLE")
+        if not response.startswith("OK"):
+            raise ProtocolError(f"Failed to disable cache: {response}")
+
+    async def optimize(self, table: Optional[str] = None) -> None:
+        """
+        Optimize index.
+
+        Args:
+            table: If specified, only optimize this table.
+                   If None, optimize all tables.
+        """
+        if table:
+            ensure_safe_command_value(table, "table")
+            cmd = f"OPTIMIZE {table}"
+        else:
+            cmd = "OPTIMIZE"
+        response = await self.send_command(cmd)
+        if not response.startswith("OK"):
+            raise ProtocolError(f"Failed to optimize: {response}")
+
     async def send_command(self, command: str) -> str:
         """
         Send raw command to server.
@@ -420,16 +553,30 @@ class MygramClient:
             return True
 
         # Multi-line INFO/CONFIG responses
-        if "OK INFO\n" in buffer or "OK CONFIG\n" in buffer or buffer.startswith("+OK\n"):
+        if (
+            "OK INFO\n" in buffer
+            or "OK CONFIG\n" in buffer
+            or buffer.startswith("+OK\n")
+        ):
             return (
                 buffer.endswith("\n\n")
                 or buffer.endswith("\r\n\r\n")
                 or buffer.endswith("\n\r\n")
             )
 
-        # Multi-line REPLICATION response
-        if buffer.startswith("OK REPLICATION\n"):
-            return "\nEND\n" in buffer or buffer.endswith("\nEND")
+        # Multi-line REPLICATION/DUMP_STATUS/CACHE_STATS responses (end with END marker)
+        if (
+            buffer.startswith("OK REPLICATION\n")
+            or buffer.startswith("OK REPLICATION\r\n")
+            or "OK DUMP_STATUS" in buffer
+            or "OK CACHE_STATS" in buffer
+        ):
+            return (
+                "\nEND\n" in buffer
+                or "\nEND\r\n" in buffer
+                or buffer.endswith("\nEND")
+                or buffer.endswith("\r\nEND")
+            )
 
         # Debug response
         if "# DEBUG" in buffer:
@@ -643,12 +790,108 @@ class MygramClient:
                 debug.final = int(value)
             elif key == "optimization":
                 debug.optimization = value
+            elif key == "sort":
+                debug.sort = value
+            elif key == "cache":
+                debug.cache = value
+            elif key == "cache_age_ms":
+                debug.cache_age_ms = float(value)
+            elif key == "cache_saved_ms":
+                debug.cache_saved_ms = float(value)
             elif key == "limit":
                 debug.limit = int(value.replace("(default)", "").strip())
             elif key == "offset":
                 debug.offset = int(value.replace("(default)", "").strip())
 
         return debug
+
+    @staticmethod
+    def _parse_dump_status_response(response: str) -> DumpStatus:
+        """Parse DUMP STATUS response."""
+        if not response.startswith("OK DUMP_STATUS"):
+            raise ProtocolError(f"Invalid DUMP STATUS response: {response}")
+
+        status = DumpStatus()
+        lines = response.split("\n")[1:]
+
+        for line in lines:
+            trimmed = line.strip()
+            if not trimmed or trimmed == "END":
+                continue
+
+            idx = trimmed.find(":")
+            if idx < 0:
+                continue
+
+            key = trimmed[:idx].strip()
+            value = trimmed[idx + 1:].strip()
+
+            if key == "save_in_progress":
+                status.save_in_progress = value == "true"
+            elif key == "load_in_progress":
+                status.load_in_progress = value == "true"
+            elif key == "status":
+                status.status = value
+            elif key == "filepath":
+                status.filepath = value
+            elif key == "tables_processed":
+                status.tables_processed = int(value)
+            elif key == "tables_total":
+                status.tables_total = int(value)
+            elif key == "current_table":
+                status.current_table = value
+            elif key == "elapsed_seconds":
+                status.elapsed_seconds = float(value)
+            elif key == "result_filepath":
+                status.result_filepath = value
+            elif key == "error":
+                status.error = value
+
+        return status
+
+    @staticmethod
+    def _parse_cache_stats_response(response: str) -> CacheStats:
+        """Parse CACHE STATS response."""
+        if not response.startswith("OK CACHE_STATS"):
+            raise ProtocolError(f"Invalid CACHE STATS response: {response}")
+
+        stats = CacheStats()
+        lines = response.split("\n")[1:]
+
+        for line in lines:
+            trimmed = line.strip()
+            if not trimmed or trimmed == "END" or trimmed.startswith("#"):
+                continue
+
+            idx = trimmed.find(":")
+            if idx < 0:
+                continue
+
+            key = trimmed[:idx].strip()
+            value = trimmed[idx + 1:].strip()
+
+            if key in ("enabled", "cache_enabled"):
+                stats.enabled = value in ("true", "1")
+            elif key in ("hits", "cache_hits"):
+                stats.hits = int(value)
+            elif key in ("misses", "cache_misses"):
+                stats.misses = int(value)
+            elif key in ("hit_rate", "cache_hit_rate"):
+                stats.hit_rate = float(value.replace("%", ""))
+            elif key in ("entries", "cache_current_entries", "current_entries"):
+                stats.current_entries = int(value)
+            elif key in ("memory_bytes", "cache_memory_bytes", "current_memory_bytes"):
+                stats.memory_bytes = int(value)
+            elif key in ("evictions", "cache_evictions"):
+                stats.evictions = int(value)
+            elif key == "max_memory_mb":
+                stats.max_memory_mb = float(value)
+            elif key == "current_memory_mb":
+                stats.current_memory_mb = float(value)
+            elif key == "ttl_seconds":
+                stats.ttl_seconds = int(value)
+
+        return stats
 
 
 def create_mygram_client(config: Optional[ClientConfig] = None) -> MygramClient:

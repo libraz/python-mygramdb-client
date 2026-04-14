@@ -1,14 +1,15 @@
 [project]
 name = "mygramdb-client"
 version = "1.0.0"
-description = "Python client for MygramDB - high-performance in-memory full-text search engine"
+description = "Python client for MygramDB - high-performance in-memory full-text search engine with MySQL replication support"
 authors = [
     { name = "libraz", email = "libraz@libraz.net" }
 ]
+license = { text = "MIT" }
 dependencies = []
 readme = "README.md"
 requires-python = ">= 3.9"
-keywords = ["mygramdb", "full-text-search", "database", "client"]
+keywords = ["mygramdb", "full-text-search", "database", "client", "asyncio"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -18,9 +19,17 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Database",
     "Topic :: Text Processing :: Indexing",
+    "Framework :: AsyncIO",
+    "Typing :: Typed",
 ]
+
+[project.urls]
+Homepage = "https://github.com/libraz/python-mygramdb-client"
+Repository = "https://github.com/libraz/python-mygramdb-client"
+Issues = "https://github.com/libraz/python-mygramdb-client/issues"
 
 [build-system]
 requires = ["hatchling"]
@@ -32,6 +41,7 @@ dev-dependencies = [
     "flake8>=7.0.0",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
 ]
 
 [tool.hatch.metadata]

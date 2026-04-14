@@ -4,8 +4,6 @@ Integration tests for MygramDB client parsing and protocol handling.
 These tests verify parsing logic without requiring a real server.
 They can run in CI environments.
 """
-import pytest
-
 from mygramdb_client import (
     ClientConfig,
     MygramClient,

@@ -1,11 +1,15 @@
 """Tests for MygramClient."""
+import asyncio
+
 import pytest
 
 from mygramdb_client import (
+    CacheStats,
     ClientConfig,
     CountResponse,
     DebugInfo,
     Document,
+    DumpStatus,
     MygramClient,
     ReplicationStatus,
     SearchResponse,
@@ -38,6 +42,14 @@ class TestClientConfig:
         assert config.timeout == 10.0
         assert config.recv_buffer_size == 1024
         assert config.max_query_length == 256
+
+    def test_socket_path_default(self):
+        config = ClientConfig()
+        assert config.socket_path == ""
+
+    def test_socket_path_custom(self):
+        config = ClientConfig(socket_path="/tmp/mygramdb.sock")
+        assert config.socket_path == "/tmp/mygramdb.sock"
 
 
 class TestSearchResponseParsing:
@@ -240,3 +252,403 @@ class TestDebugInfoParsing:
 
         assert result.limit == 1000
         assert result.offset == 0
+
+    def test_parse_debug_info_with_cache_fields(self):
+        lines = [
+            "query_time: 1.5",
+            "terms: 2",
+            "sort: id DESC",
+            "cache: hit",
+            "cache_age_ms: 123.4",
+            "cache_saved_ms: 2100.0",
+        ]
+        result = MygramClient._parse_debug_info(lines)
+
+        assert result.query_time_ms == 1.5
+        assert result.sort == "id DESC"
+        assert result.cache == "hit"
+        assert result.cache_age_ms == 123.4
+        assert result.cache_saved_ms == 2100.0
+
+
+class TestDumpStatusParsing:
+    """Tests for dump status response parsing."""
+
+    def test_parse_dump_status_idle(self):
+        response = """OK DUMP_STATUS
+status: idle"""
+        result = MygramClient._parse_dump_status_response(response)
+
+        assert isinstance(result, DumpStatus)
+        assert result.status == "idle"
+        assert result.filepath == ""
+        assert result.tables_total == 0
+
+    def test_parse_dump_status_saving(self):
+        response = """OK DUMP_STATUS
+status: saving
+filepath: /backup/dump.dmp
+tables_total: 5
+tables_processed: 2
+current_table: articles
+elapsed_seconds: 3.5"""
+        result = MygramClient._parse_dump_status_response(response)
+
+        assert result.status == "saving"
+        assert result.filepath == "/backup/dump.dmp"
+        assert result.tables_total == 5
+        assert result.tables_processed == 2
+        assert result.current_table == "articles"
+        assert result.elapsed_seconds == 3.5
+
+    def test_parse_dump_status_with_error(self):
+        response = """OK DUMP_STATUS
+status: failed
+error: disk full"""
+        result = MygramClient._parse_dump_status_response(response)
+
+        assert result.status == "failed"
+        assert result.error == "disk full"
+
+    def test_parse_dump_status_with_progress_flags(self):
+        response = """OK DUMP_STATUS
+save_in_progress: true
+load_in_progress: false
+status: saving
+result_filepath: /backup/output.dmp"""
+        result = MygramClient._parse_dump_status_response(response)
+
+        assert result.save_in_progress is True
+        assert result.load_in_progress is False
+        assert result.result_filepath == "/backup/output.dmp"
+
+    def test_parse_invalid_dump_status_raises_error(self):
+        with pytest.raises(ProtocolError, match="Invalid DUMP STATUS"):
+            MygramClient._parse_dump_status_response("INVALID")
+
+
+class TestCacheStatsParsing:
+    """Tests for cache stats response parsing."""
+
+    def test_parse_cache_stats_go_format(self):
+        """Parse cache stats with Go-client key format."""
+        response = """OK CACHE_STATS
+cache_enabled: 1
+cache_hits: 5000
+cache_misses: 1000
+cache_hit_rate: 83.3
+cache_current_entries: 500
+cache_memory_bytes: 10485760
+cache_evictions: 50"""
+        result = MygramClient._parse_cache_stats_response(response)
+
+        assert isinstance(result, CacheStats)
+        assert result.enabled is True
+        assert result.hits == 5000
+        assert result.misses == 1000
+        assert result.hit_rate == 83.3
+        assert result.current_entries == 500
+        assert result.memory_bytes == 10485760
+        assert result.evictions == 50
+
+    def test_parse_cache_stats_node_format(self):
+        """Parse cache stats with Node.js-client key format."""
+        response = """OK CACHE_STATS
+enabled: true
+max_memory_mb: 32.0
+current_memory_mb: 10.5
+entries: 500
+hits: 5000
+misses: 1000
+hit_rate: 83.3%
+evictions: 50
+ttl_seconds: 3600"""
+        result = MygramClient._parse_cache_stats_response(response)
+
+        assert result.enabled is True
+        assert result.max_memory_mb == 32.0
+        assert result.current_memory_mb == 10.5
+        assert result.current_entries == 500
+        assert result.hits == 5000
+        assert result.misses == 1000
+        assert result.hit_rate == 83.3
+        assert result.evictions == 50
+        assert result.ttl_seconds == 3600
+
+    def test_parse_cache_stats_disabled(self):
+        response = """OK CACHE_STATS
+cache_enabled: 0
+cache_hits: 0
+cache_misses: 0"""
+        result = MygramClient._parse_cache_stats_response(response)
+
+        assert result.enabled is False
+        assert result.hits == 0
+
+    def test_parse_invalid_cache_stats_raises_error(self):
+        with pytest.raises(ProtocolError, match="Invalid CACHE STATS"):
+            MygramClient._parse_cache_stats_response("INVALID")
+
+
+class TestDumpSaveResponseParsing:
+    """Tests for dump_save response validation."""
+
+    def test_parse_dump_started_response(self):
+        response = "OK DUMP_STARTED /backup/dump.dmp"
+        assert response.startswith("OK DUMP_STARTED ")
+        filepath = response[16:]
+        assert filepath == "/backup/dump.dmp"
+
+    def test_parse_dump_saved_response(self):
+        response = "OK DUMP_SAVED /backup/dump.dmp"
+        assert response.startswith("OK DUMP_SAVED ")
+        filepath = response[14:]
+        assert filepath == "/backup/dump.dmp"
+
+    def test_invalid_dump_save_response(self):
+        """Neither DUMP_STARTED nor DUMP_SAVED should raise ProtocolError."""
+        response = "OK SOMETHING_ELSE"
+        assert not response.startswith("OK DUMP_STARTED ")
+        assert not response.startswith("OK DUMP_SAVED ")
+
+
+class TestDumpStatusParsingEdgeCases:
+    """Edge case tests for dump status parsing."""
+
+    def test_parse_dump_status_completed(self):
+        response = """OK DUMP_STATUS
+status: completed
+filepath: /backup/dump.dmp
+tables_total: 5
+tables_processed: 5
+elapsed_seconds: 12.3
+result_filepath: /backup/dump.dmp"""
+        result = MygramClient._parse_dump_status_response(response)
+
+        assert result.status == "completed"
+        assert result.tables_total == 5
+        assert result.tables_processed == 5
+        assert result.elapsed_seconds == 12.3
+        assert result.result_filepath == "/backup/dump.dmp"
+
+    def test_parse_dump_status_loading(self):
+        response = """OK DUMP_STATUS
+status: loading
+load_in_progress: true
+filepath: /backup/dump.dmp"""
+        result = MygramClient._parse_dump_status_response(response)
+
+        assert result.status == "loading"
+        assert result.load_in_progress is True
+
+    def test_parse_dump_status_header_only(self):
+        response = "OK DUMP_STATUS"
+        result = MygramClient._parse_dump_status_response(response)
+
+        assert result.status == ""
+        assert result.filepath == ""
+
+    def test_parse_dump_status_with_end_marker(self):
+        response = """OK DUMP_STATUS
+status: idle
+END"""
+        result = MygramClient._parse_dump_status_response(response)
+
+        assert result.status == "idle"
+
+    def test_parse_dump_status_real_server_format(self):
+        """Parse actual server response format."""
+        response = """OK DUMP_STATUS
+save_in_progress: false
+load_in_progress: false
+replication_paused_for_dump: false
+status: IDLE
+END"""
+        result = MygramClient._parse_dump_status_response(response)
+
+        assert result.save_in_progress is False
+        assert result.load_in_progress is False
+        assert result.status == "IDLE"
+
+
+class TestCacheStatsParsingEdgeCases:
+    """Edge case tests for cache stats parsing."""
+
+    def test_parse_cache_stats_header_only(self):
+        response = "OK CACHE_STATS"
+        result = MygramClient._parse_cache_stats_response(response)
+
+        assert result.enabled is False
+        assert result.hits == 0
+
+    def test_parse_cache_stats_real_server_format(self):
+        """Parse actual server response format with section header and END."""
+        response = """OK CACHE_STATS
+
+# Cache
+enabled: true
+total_queries: 16
+cache_hits: 0
+cache_misses: 16
+hit_rate: 0.0000
+current_entries: 0
+current_memory_bytes: 0
+evictions: 0
+ttl_expirations: 0
+invalidations_immediate: 0
+invalidations_deferred: 0
+invalidations_batches: 0
+avg_cache_miss_time_ms: 0.000
+total_time_saved_ms: 0.000
+
+END"""
+        result = MygramClient._parse_cache_stats_response(response)
+
+        assert result.enabled is True
+        assert result.hits == 0
+        assert result.misses == 16
+        assert result.hit_rate == 0.0
+        assert result.current_entries == 0
+        assert result.memory_bytes == 0
+        assert result.evictions == 0
+
+    def test_parse_cache_stats_current_memory_bytes_maps_to_memory_bytes(self):
+        """current_memory_bytes key should map to memory_bytes field."""
+        response = """OK CACHE_STATS
+current_memory_bytes: 10485760
+current_entries: 42
+END"""
+        result = MygramClient._parse_cache_stats_response(response)
+
+        assert result.memory_bytes == 10485760
+        assert result.current_entries == 42
+
+    def test_parse_cache_stats_section_header_skipped(self):
+        """Lines starting with # should be ignored."""
+        response = """OK CACHE_STATS
+# Cache
+# Metrics
+cache_hits: 100
+END"""
+        result = MygramClient._parse_cache_stats_response(response)
+
+        assert result.hits == 100
+
+    def test_parse_cache_stats_hit_rate_without_percent(self):
+        response = """OK CACHE_STATS
+hit_rate: 83.3"""
+        result = MygramClient._parse_cache_stats_response(response)
+        assert result.hit_rate == 83.3
+
+    def test_parse_cache_stats_enabled_true_string(self):
+        response = """OK CACHE_STATS
+enabled: true"""
+        result = MygramClient._parse_cache_stats_response(response)
+        assert result.enabled is True
+
+    def test_parse_cache_stats_enabled_one_string(self):
+        response = """OK CACHE_STATS
+cache_enabled: 1"""
+        result = MygramClient._parse_cache_stats_response(response)
+        assert result.enabled is True
+
+    def test_parse_cache_stats_disabled_false_string(self):
+        response = """OK CACHE_STATS
+enabled: false"""
+        result = MygramClient._parse_cache_stats_response(response)
+        assert result.enabled is False
+
+    def test_parse_cache_stats_disabled_zero_string(self):
+        response = """OK CACHE_STATS
+cache_enabled: 0"""
+        result = MygramClient._parse_cache_stats_response(response)
+        assert result.enabled is False
+
+
+class TestDebugInfoNewFieldsDefaults:
+    """Tests for DebugInfo new field defaults."""
+
+    def test_new_fields_default_to_none(self):
+        debug = DebugInfo()
+        assert debug.sort is None
+        assert debug.cache is None
+        assert debug.cache_age_ms is None
+        assert debug.cache_saved_ms is None
+
+    def test_parse_debug_info_cache_miss(self):
+        lines = [
+            "cache: miss",
+        ]
+        result = MygramClient._parse_debug_info(lines)
+        assert result.cache == "miss"
+        assert result.cache_age_ms is None
+        assert result.cache_saved_ms is None
+
+    def test_parse_debug_info_cache_disabled(self):
+        lines = [
+            "cache: disabled",
+        ]
+        result = MygramClient._parse_debug_info(lines)
+        assert result.cache == "disabled"
+
+
+class TestAsyncContextManager:
+    """Tests for async context manager support."""
+
+    def test_client_has_aenter_and_aexit(self):
+        client = MygramClient()
+        assert hasattr(client, "__aenter__")
+        assert hasattr(client, "__aexit__")
+        assert asyncio.iscoroutinefunction(client.__aenter__)
+        assert asyncio.iscoroutinefunction(client.__aexit__)
+
+    @pytest.mark.asyncio
+    async def test_context_manager_connects_and_disconnects(self):
+        """Context manager should call connect on enter and disconnect on exit."""
+        connect_called = False
+        disconnect_called = False
+
+        client = MygramClient()
+
+        async def mock_connect():
+            nonlocal connect_called
+            connect_called = True
+            client._connected = True
+
+        async def mock_disconnect():
+            nonlocal disconnect_called
+            disconnect_called = True
+            client._connected = False
+
+        client.connect = mock_connect
+        client.disconnect = mock_disconnect
+
+        async with client:
+            assert connect_called
+            assert not disconnect_called
+
+        assert disconnect_called
+
+    @pytest.mark.asyncio
+    async def test_context_manager_disconnects_on_exception(self):
+        """Context manager should disconnect even when exception occurs."""
+        disconnect_called = False
+
+        client = MygramClient()
+
+        async def mock_connect():
+            client._connected = True
+
+        async def mock_disconnect():
+            nonlocal disconnect_called
+            disconnect_called = True
+            client._connected = False
+
+        client.connect = mock_connect
+        client.disconnect = mock_disconnect
+
+        with pytest.raises(RuntimeError, match="test error"):
+            async with client:
+                raise RuntimeError("test error")
+
+        assert disconnect_called

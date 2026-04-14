@@ -1,30 +1,37 @@
-# mygramdb-client
+# python-mygramdb-client
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://img.shields.io/github/actions/workflow/status/libraz/python-mygramdb-client/ci.yml?branch=main&label=CI)](https://github.com/libraz/python-mygramdb-client/actions)
+[![codecov](https://codecov.io/gh/libraz/python-mygramdb-client/branch/main/graph/badge.svg)](https://codecov.io/gh/libraz/python-mygramdb-client)
+[![Python](https://img.shields.io/badge/python-%E2%89%A53.9-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](https://github.com/libraz/python-mygramdb-client)
 
-[MygramDB](https://github.com/libraz/mygram-db/) 用の Python クライアントライブラリ - MySQL FULLTEXT の **25〜200倍高速** な高性能インメモリ全文検索エンジンで、MySQL レプリケーションをサポートしています。
+[MygramDB](https://github.com/libraz/mygram-db/) 用の Python クライアントライブラリ — MySQL レプリケーションをサポートする高性能インメモリ全文検索エンジン。
 
-## 特徴
+## 概要
 
-- **Async/Await API** - モダンな asyncio ベースのインターフェース
-- **完全なプロトコルサポート** - すべての MygramDB コマンド（SEARCH、COUNT、GET、INFO など）
-- **検索式パーサー** - Web スタイルの検索構文（+必須、-除外、"フレーズ"、OR、グループ化）
-- **型安全性** - dataclass による完全な型ヒント
-- **入力バリデーション** - 制御文字インジェクションに対する組み込み保護
-- **デバッグモード** - クエリパフォーマンスメトリクスの組み込みサポート
+MygramDB は MySQL FULLTEXT の **25〜200倍高速** な全文検索を提供します。このクライアントは MygramDB の TCP テキストプロトコル（memcached スタイル）で通信し、外部依存はゼロです。
+
+| | MySQL FULLTEXT | MygramDB |
+|---|---|---|
+| **検索速度** | ベースライン | 25〜200倍高速 |
+| **ストレージ** | ディスク | インメモリ |
+| **レプリケーション** | — | MySQL binlog |
+| **プロトコル** | MySQL | TCP（memcached スタイル） |
+
+### 特徴
+
+- **外部依存ゼロ** — 標準ライブラリのみ
+- **Async/Await API** — コンテキストマネージャ対応のモダンな asyncio ベースインターフェース
+- **検索式パーサー** — Web スタイルの検索構文（+必須、-除外、"フレーズ"、OR、グループ化）
+- **完全なプロトコルサポート** — すべての MygramDB コマンド（SEARCH、COUNT、GET、INFO、CACHE、DUMP、OPTIMIZE など）
+- **型安全性** — dataclass による完全な型ヒント
+- **入力バリデーション** — 制御文字インジェクションに対する組み込み保護
 
 ## インストール
 
-### GitHub からインストール
-
 ```bash
-pip install git+https://github.com/libraz/python-mygramdb-client.git
-```
-
-### rye を使用する場合
-
-```bash
-rye add mygramdb-client --git https://github.com/libraz/python-mygramdb-client.git
+pip install mygramdb-client
 ```
 
 ### ソースからインストール
@@ -35,61 +42,54 @@ cd python-mygramdb-client
 rye sync
 ```
 
-> **Note:** PyPI への登録は将来的に予定しています。
-
 ## クイックスタート
 
 ```python
 import asyncio
-from mygramdb_client import MygramClient, ClientConfig, SearchOptions, simplify_search_expression
+from mygramdb_client import MygramClient, ClientConfig, SearchOptions
 
 async def main():
-    # 設定を指定してクライアントを作成
-    client = MygramClient(ClientConfig(
-        host='localhost',
-        port=11016
-    ))
+    async with MygramClient(ClientConfig(host='localhost', port=11016)) as client:
+        # 検索
+        results = await client.search('articles', 'hello', SearchOptions(limit=100))
+        print(f"{results.total_count} 件の結果が見つかりました")
 
-    await client.connect()
+        # カウント
+        count = await client.count('articles', 'technology')
+        print(f"カウント: {count.count}")
 
-    # Web スタイルの検索式をパース（スペース = AND、- = NOT）
-    expr = simplify_search_expression('hello world -spam')
-    # expr = SimplifiedExpression(main_term='hello', and_terms=['world'], not_terms=['spam'])
-
-    # AND/NOT 条件で検索
-    results = await client.search('articles', expr.main_term, SearchOptions(
-        and_terms=expr.and_terms,
-        not_terms=expr.not_terms,
-        limit=100,
-        offset=50,  # MySQL互換: LIMIT 50,100
-        filters={'status': 'published', 'lang': 'ja'},
-        sort_column='created_at',
-        sort_desc=True
-    ))
-
-    print(f"{results.total_count} 件の結果が見つかりました")
-
-    # マッチするドキュメントをカウント
-    count = await client.count('articles', 'technology')
-
-    # ID でドキュメントを取得
-    doc = await client.get('articles', '12345')
-
-    await client.disconnect()
+        # ID でドキュメントを取得
+        doc = await client.get('articles', '12345')
+        print(f"Doc: {doc.primary_key} {doc.fields}")
 
 asyncio.run(main())
 ```
 
-## ドキュメント
+## 検索式
 
-- **[はじめに](docs/ja/getting-started.md)** - インストール、設定、基本的な使い方
-- **[API リファレンス](docs/ja/api-reference.md)** - 完全な API ドキュメント
-- **[検索式](docs/ja/search-expression.md)** - 高度な検索構文ガイド
-- **[高度な使い方](docs/ja/advanced-usage.md)** - コネクションプーリング、エラーハンドリング、ベストプラクティス
+Web スタイルの検索クエリを構造化された検索パラメータにパースします：
+
+```python
+from mygramdb_client import simplify_search_expression
+
+# スペース = AND、- = NOT、"" = フレーズ、OR = OR、() = グループ化
+expr = simplify_search_expression('hello world -spam')
+# expr = SimplifiedExpression(main_term='hello', and_terms=['world'], not_terms=['spam'])
+
+results = await client.search('articles', expr.main_term, SearchOptions(
+    and_terms=expr.and_terms,
+    not_terms=expr.not_terms,
+    limit=100,
+    offset=50,
+    filters={'status': 'published', 'lang': 'ja'},
+    sort_column='created_at',
+    sort_desc=True,
+))
+```
 
 ## 型ヒント
 
-このライブラリは dataclass による完全な型ヒントを提供します：
+完全な型定義が含まれています：
 
 ```python
 from mygramdb_client import (
@@ -98,36 +98,21 @@ from mygramdb_client import (
     CountResponse,
     Document,
     ServerInfo,
-    SearchOptions
+    SearchOptions,
+    DumpStatus,
+    CacheStats,
 )
 ```
 
 ## 開発
 
 ```bash
-# 依存関係をインストール
-rye sync
-
-# テストを実行
-rye run pytest
-
-# リント
-rye run flake8 src tests
+rye sync              # 依存関係をインストール
+rye run pytest        # テストを実行
+rye run pytest -v     # テストを実行（詳細）
+rye run flake8 src tests  # リント
 ```
 
 ## ライセンス
 
-MIT
-
-## 作者
-
-libraz <libraz@libraz.net>
-
-## リンク
-
-- [MygramDB](https://github.com/libraz/mygram-db/) - MygramDB サーバー
-- [GitHub](https://github.com/libraz/python-mygramdb-client) - このリポジトリ
-
-## コントリビューション
-
-コントリビューションを歓迎します！お気軽に Pull Request を送信してください。
+[MIT](LICENSE)

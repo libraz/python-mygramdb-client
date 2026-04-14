@@ -1,30 +1,37 @@
-# mygramdb-client
+# python-mygramdb-client
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://img.shields.io/github/actions/workflow/status/libraz/python-mygramdb-client/ci.yml?branch=main&label=CI)](https://github.com/libraz/python-mygramdb-client/actions)
+[![codecov](https://codecov.io/gh/libraz/python-mygramdb-client/branch/main/graph/badge.svg)](https://codecov.io/gh/libraz/python-mygramdb-client)
+[![Python](https://img.shields.io/badge/python-%E2%89%A53.9-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](https://github.com/libraz/python-mygramdb-client)
 
-Python client library for [MygramDB](https://github.com/libraz/mygram-db/) - A high-performance in-memory full-text search engine that is **25-200x faster** than MySQL FULLTEXT with MySQL replication support.
+Python client library for [MygramDB](https://github.com/libraz/mygram-db/) — a high-performance in-memory full-text search engine with MySQL replication support.
 
-## Features
+## Overview
 
-- **Async/Await API** - Modern asyncio-based interface
-- **Full Protocol Support** - All MygramDB commands (SEARCH, COUNT, GET, INFO, etc.)
-- **Search Expression Parser** - Web-style search syntax (+required, -excluded, "phrase", OR, grouping)
-- **Type Safety** - Full type hints with dataclasses
-- **Input Validation** - Built-in protection against control character injection
-- **Debug Mode** - Built-in support for query performance metrics
+MygramDB provides **25-200x faster** full-text search than MySQL FULLTEXT. This client communicates via MygramDB's TCP text protocol (memcached-style) with zero external dependencies.
+
+| | MySQL FULLTEXT | MygramDB |
+|---|---|---|
+| **Search Speed** | Baseline | 25-200x faster |
+| **Storage** | On-disk | In-memory |
+| **Replication** | — | MySQL binlog |
+| **Protocol** | MySQL | TCP (memcached-style) |
+
+### Features
+
+- **Zero Dependencies** — Standard library only
+- **Async/Await API** — Modern asyncio-based interface with context manager support
+- **Search Expression Parser** — Web-style search syntax (+required, -excluded, "phrase", OR, grouping)
+- **Full Protocol Support** — All MygramDB commands (SEARCH, COUNT, GET, INFO, CACHE, DUMP, OPTIMIZE, etc.)
+- **Type Safety** — Full type hints with dataclasses
+- **Input Validation** — Built-in protection against control character injection
 
 ## Installation
 
-### From GitHub
-
 ```bash
-pip install git+https://github.com/libraz/python-mygramdb-client.git
-```
-
-### Using rye
-
-```bash
-rye add mygramdb-client --git https://github.com/libraz/python-mygramdb-client.git
+pip install mygramdb-client
 ```
 
 ### From source
@@ -35,61 +42,54 @@ cd python-mygramdb-client
 rye sync
 ```
 
-> **Note:** PyPI registration is planned for the future.
-
 ## Quick Start
 
 ```python
 import asyncio
-from mygramdb_client import MygramClient, ClientConfig, SearchOptions, simplify_search_expression
+from mygramdb_client import MygramClient, ClientConfig, SearchOptions
 
 async def main():
-    # Create client with configuration
-    client = MygramClient(ClientConfig(
-        host='localhost',
-        port=11016
-    ))
+    async with MygramClient(ClientConfig(host='localhost', port=11016)) as client:
+        # Search
+        results = await client.search('articles', 'hello', SearchOptions(limit=100))
+        print(f"Found {results.total_count} results")
 
-    await client.connect()
+        # Count
+        count = await client.count('articles', 'technology')
+        print(f"Count: {count.count}")
 
-    # Parse web-style search expression (space = AND, - = NOT)
-    expr = simplify_search_expression('hello world -spam')
-    # expr = SimplifiedExpression(main_term='hello', and_terms=['world'], not_terms=['spam'])
-
-    # Search with AND/NOT terms
-    results = await client.search('articles', expr.main_term, SearchOptions(
-        and_terms=expr.and_terms,
-        not_terms=expr.not_terms,
-        limit=100,
-        offset=50,  # MySQL-compatible: LIMIT 50,100
-        filters={'status': 'published', 'lang': 'en'},
-        sort_column='created_at',
-        sort_desc=True
-    ))
-
-    print(f"Found {results.total_count} results")
-
-    # Count matching documents
-    count = await client.count('articles', 'technology')
-
-    # Get document by ID
-    doc = await client.get('articles', '12345')
-
-    await client.disconnect()
+        # Get document by ID
+        doc = await client.get('articles', '12345')
+        print(f"Doc: {doc.primary_key} {doc.fields}")
 
 asyncio.run(main())
 ```
 
-## Documentation
+## Search Expressions
 
-- **[Getting Started](docs/en/getting-started.md)** - Installation, configuration, and basic usage
-- **[API Reference](docs/en/api-reference.md)** - Complete API documentation
-- **[Search Expression](docs/en/search-expression.md)** - Advanced search syntax guide
-- **[Advanced Usage](docs/en/advanced-usage.md)** - Connection pooling, error handling, and best practices
+Parse web-style search queries into structured search parameters:
+
+```python
+from mygramdb_client import simplify_search_expression
+
+# Space = AND, - = NOT, "" = phrase, OR = OR, () = grouping
+expr = simplify_search_expression('hello world -spam')
+# expr = SimplifiedExpression(main_term='hello', and_terms=['world'], not_terms=['spam'])
+
+results = await client.search('articles', expr.main_term, SearchOptions(
+    and_terms=expr.and_terms,
+    not_terms=expr.not_terms,
+    limit=100,
+    offset=50,
+    filters={'status': 'published', 'lang': 'en'},
+    sort_column='created_at',
+    sort_desc=True,
+))
+```
 
 ## Type Hints
 
-The library provides full type hints with dataclasses:
+Full type definitions are included:
 
 ```python
 from mygramdb_client import (
@@ -98,36 +98,21 @@ from mygramdb_client import (
     CountResponse,
     Document,
     ServerInfo,
-    SearchOptions
+    SearchOptions,
+    DumpStatus,
+    CacheStats,
 )
 ```
 
 ## Development
 
 ```bash
-# Install dependencies
-rye sync
-
-# Run tests
-rye run pytest
-
-# Lint
-rye run flake8 src tests
+rye sync              # Install dependencies
+rye run pytest        # Run tests
+rye run pytest -v     # Run tests (verbose)
+rye run flake8 src tests  # Lint
 ```
 
 ## License
 
-MIT
-
-## Author
-
-libraz <libraz@libraz.net>
-
-## Links
-
-- [MygramDB](https://github.com/libraz/mygram-db/) - The MygramDB server
-- [GitHub](https://github.com/libraz/python-mygramdb-client) - This repository
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
+[MIT](LICENSE)

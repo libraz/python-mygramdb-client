@@ -189,6 +189,8 @@ class TestSearch:
         info = await client.info()
         if not info.tables:
             pytest.skip("No tables available")
+        if info.doc_count == 0:
+            pytest.skip("No documents indexed (debug info requires search results)")
 
         await client.enable_debug()
         table = info.tables[0]
@@ -240,6 +242,8 @@ class TestCount:
         info = await client.info()
         if not info.tables:
             pytest.skip("No tables available")
+        if info.doc_count == 0:
+            pytest.skip("No documents indexed (debug info requires search results)")
 
         await client.enable_debug()
         table = info.tables[0]
@@ -350,3 +354,78 @@ class TestSearchWithWebStyleExpressions:
 
         assert result is not None
         assert isinstance(result.count, int)
+
+
+class TestCacheOperations:
+    """Cache operation tests."""
+
+    async def test_cache_stats(self, client):
+        stats = await client.cache_stats()
+
+        assert stats is not None
+        assert isinstance(stats.enabled, bool)
+        assert isinstance(stats.hits, int)
+        assert isinstance(stats.misses, int)
+
+    async def test_cache_clear_all(self, client):
+        await client.cache_clear()
+        # No exception means success
+
+    async def test_cache_clear_specific_table(self, client):
+        info = await client.info()
+        if not info.tables:
+            pytest.skip("No tables available")
+
+        await client.cache_clear(info.tables[0])
+        # No exception means success
+
+    async def test_cache_enable_disable(self, client):
+        await client.cache_enable()
+        await client.cache_disable()
+        await client.cache_enable()
+        # No exception means success
+
+
+class TestDumpOperations:
+    """Dump operation tests."""
+
+    async def test_dump_status(self, client):
+        status = await client.dump_status()
+
+        assert status is not None
+        assert isinstance(status.status, str)
+        assert isinstance(status.tables_total, int)
+        assert isinstance(status.tables_processed, int)
+
+
+class TestOptimize:
+    """Optimize tests."""
+
+    async def test_optimize_specific_table(self, client):
+        info = await client.info()
+        if not info.tables:
+            pytest.skip("No tables available")
+
+        await client.optimize(info.tables[0])
+        # No exception means success
+
+
+class TestAsyncContextManagerE2E:
+    """Async context manager E2E tests."""
+
+    async def test_context_manager_connect_and_disconnect(self):
+        async with MygramClient(ClientConfig(
+            host=TEST_HOST, port=TEST_PORT, timeout=5.0
+        )) as client:
+            assert client.is_connected() is True
+            info = await client.info()
+            assert info is not None
+
+    async def test_context_manager_disconnects_after_exit(self):
+        client = MygramClient(ClientConfig(
+            host=TEST_HOST, port=TEST_PORT, timeout=5.0
+        ))
+        async with client:
+            assert client.is_connected() is True
+
+        assert client.is_connected() is False

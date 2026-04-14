@@ -35,11 +35,13 @@ from .search_expression import (
     to_query_string,
 )
 from .types import (
+    CacheStats,
     ClientConfig,
     CountOptions,
     CountResponse,
     DebugInfo,
     Document,
+    DumpStatus,
     ReplicationStatus,
     SearchOptions,
     SearchResponse,
@@ -66,6 +68,8 @@ __all__ = [
     "ServerInfo",
     "ReplicationStatus",
     "DebugInfo",
+    "DumpStatus",
+    "CacheStats",
     # Search expression
     "SearchExpression",
     "SimplifiedExpression",
