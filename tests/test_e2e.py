@@ -12,10 +12,13 @@ import pytest
 from mygramdb_client import (
     ClientConfig,
     CountOptions,
+    FacetOptions,
+    HighlightOptions,
     MygramClient,
     SearchOptions,
     simplify_search_expression,
 )
+from mygramdb_client.errors import ProtocolError
 
 TEST_HOST = os.environ.get("MYGRAM_HOST", "127.0.0.1")
 TEST_PORT = int(os.environ.get("MYGRAM_PORT", "11016"))
@@ -408,6 +411,130 @@ class TestOptimize:
 
         await client.optimize(info.tables[0])
         # No exception means success
+
+
+class TestV16Features:
+    """
+    End-to-end tests for MygramDB v1.6 features.
+
+    Some features require specific server configuration (e.g. HIGHLIGHT/
+    _score require ``memory.verify_text: ascii|all``). Tests wrap optional
+    features in try/except ``ProtocolError`` so they pass even if the
+    server is running with defaults.
+    """
+
+    async def test_fuzzy_distance_one(self, client):
+        info = await client.info()
+        if not info.tables:
+            pytest.skip("No tables available")
+
+        table = info.tables[0]
+        result = await client.search(table, "hello", SearchOptions(fuzzy=1))
+
+        assert result is not None
+        assert isinstance(result.total_count, int)
+        assert result.total_count >= 0
+
+    async def test_fuzzy_distance_two(self, client):
+        info = await client.info()
+        if not info.tables:
+            pytest.skip("No tables available")
+
+        table = info.tables[0]
+        result = await client.search(table, "hello", SearchOptions(fuzzy=2))
+
+        assert result is not None
+        assert isinstance(result.total_count, int)
+
+    async def test_highlight_default(self, client):
+        info = await client.info()
+        if not info.tables:
+            pytest.skip("No tables available")
+
+        table = info.tables[0]
+        try:
+            result = await client.search(
+                table, "hello",
+                SearchOptions(highlight=HighlightOptions()),
+            )
+        except ProtocolError as e:
+            pytest.skip(f"HIGHLIGHT not supported: {e}")
+
+        assert result is not None
+        assert isinstance(result.total_count, int)
+        for r in result.results:
+            assert r.snippet is not None
+
+    async def test_highlight_custom_tags(self, client):
+        info = await client.info()
+        if not info.tables:
+            pytest.skip("No tables available")
+
+        table = info.tables[0]
+        try:
+            result = await client.search(
+                table, "hello",
+                SearchOptions(highlight=HighlightOptions(
+                    open_tag="<mark>",
+                    close_tag="</mark>",
+                    snippet_len=150,
+                    max_fragments=2,
+                )),
+            )
+        except ProtocolError as e:
+            pytest.skip(f"HIGHLIGHT not supported: {e}")
+
+        assert result is not None
+        assert isinstance(result.total_count, int)
+
+    async def test_score_sort(self, client):
+        info = await client.info()
+        if not info.tables:
+            pytest.skip("No tables available")
+
+        table = info.tables[0]
+        try:
+            result = await client.search(
+                table, "hello",
+                SearchOptions(sort_column="_score", sort_desc=True),
+            )
+        except ProtocolError as e:
+            pytest.skip(f"_score sort not supported: {e}")
+
+        assert result is not None
+        assert isinstance(result.total_count, int)
+
+    async def test_facet_no_query(self, client):
+        info = await client.info()
+        if not info.tables:
+            pytest.skip("No tables available")
+
+        table = info.tables[0]
+        try:
+            # We don't know which columns are facetable, try a common one
+            result = await client.facet(table, "status")
+        except ProtocolError as e:
+            pytest.skip(f"FACET not supported or column not faceted: {e}")
+
+        assert result is not None
+        assert isinstance(result.results, list)
+
+    async def test_facet_with_query(self, client):
+        info = await client.info()
+        if not info.tables:
+            pytest.skip("No tables available")
+
+        table = info.tables[0]
+        try:
+            result = await client.facet(
+                table, "status",
+                FacetOptions(query="test", limit=10),
+            )
+        except ProtocolError as e:
+            pytest.skip(f"FACET not supported or column not faceted: {e}")
+
+        assert result is not None
+        assert isinstance(result.results, list)
 
 
 class TestAsyncContextManagerE2E:

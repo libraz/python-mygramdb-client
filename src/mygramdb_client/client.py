@@ -11,6 +11,9 @@ from .command_utils import (
     ensure_safe_command_value,
     ensure_safe_filters,
     ensure_safe_string_array,
+    validate_facet_column,
+    validate_fuzzy,
+    validate_highlight,
 )
 from .errors import ConnectionError, ProtocolError, ServerError, TimeoutError
 from .types import (
@@ -21,6 +24,9 @@ from .types import (
     DebugInfo,
     Document,
     DumpStatus,
+    FacetOptions,
+    FacetResponse,
+    FacetValue,
     ReplicationStatus,
     SearchOptions,
     SearchResponse,
@@ -142,6 +148,9 @@ class MygramClient:
         if opts.sort_column:
             ensure_safe_command_value(opts.sort_column, "sort_column")
 
+        validate_fuzzy(opts.fuzzy)
+        validate_highlight(opts.highlight)
+
         ensure_query_length_within_limit(
             query,
             self.config.max_query_length,
@@ -163,9 +172,25 @@ class MygramClient:
         for key, value in opts.filters.items():
             parts.extend(["FILTER", key, "=", value])
 
-        # Add sort
+        # Add sort (use _score for BM25 in MygramDB v1.6+)
         if opts.sort_column:
             parts.extend(["SORT", opts.sort_column, "DESC" if opts.sort_desc else "ASC"])
+
+        # Add fuzzy (MygramDB v1.6+)
+        if opts.fuzzy > 0:
+            parts.extend(["FUZZY", str(opts.fuzzy)])
+
+        # Add highlight (MygramDB v1.6+)
+        if opts.highlight is not None:
+            parts.append("HIGHLIGHT")
+            open_tag = opts.highlight.open_tag or ""
+            close_tag = opts.highlight.close_tag or ""
+            if open_tag != "" and close_tag != "":
+                parts.extend(["TAG", open_tag, close_tag])
+            if opts.highlight.snippet_len and opts.highlight.snippet_len > 0:
+                parts.extend(["SNIPPET_LEN", str(opts.highlight.snippet_len)])
+            if opts.highlight.max_fragments and opts.highlight.max_fragments > 0:
+                parts.extend(["MAX_FRAGMENTS", str(opts.highlight.max_fragments)])
 
         # Add limit and offset
         if opts.offset > 0:
@@ -476,6 +501,65 @@ class MygramClient:
         if not response.startswith("OK"):
             raise ProtocolError(f"Failed to optimize: {response}")
 
+    async def facet(
+        self,
+        table: str,
+        column: str,
+        options: Optional[FacetOptions] = None,
+    ) -> FacetResponse:
+        """
+        Aggregate distinct filter-column values with document counts (MygramDB v1.6+).
+
+        When ``options.query`` is empty, FACET returns the distinct values
+        across the entire table. When provided, the aggregation is scoped
+        to documents matching the query (with optional AND/NOT/FILTER refinements).
+
+        Args:
+            table: Table name.
+            column: Filter column to aggregate.
+            options: Optional query, refinements and limit.
+
+        Returns:
+            FacetResponse with facet values and counts.
+
+        Raises:
+            ConnectionError: If not connected to server.
+            TimeoutError: If command times out.
+            ProtocolError: If server returns an error.
+        """
+        opts = options or FacetOptions()
+
+        ensure_safe_command_value(table, "table")
+        validate_facet_column(column)
+        if opts.query:
+            ensure_safe_command_value(opts.query, "query")
+        ensure_safe_string_array(opts.and_terms, "and_terms")
+        ensure_safe_string_array(opts.not_terms, "not_terms")
+        ensure_safe_filters(opts.filters)
+        ensure_query_length_within_limit(
+            opts.query,
+            self.config.max_query_length,
+            opts.and_terms,
+            opts.not_terms,
+        )
+
+        parts: List[str] = ["FACET", table, column]
+
+        if opts.query:
+            parts.extend(["QUERY", opts.query])
+            for term in opts.and_terms:
+                parts.extend(["AND", term])
+            for term in opts.not_terms:
+                parts.extend(["NOT", term])
+            for key, value in opts.filters.items():
+                parts.extend(["FILTER", key, "=", value])
+
+        if opts.limit > 0:
+            parts.extend(["LIMIT", str(opts.limit)])
+
+        response = await self.send_command(" ".join(parts))
+        return self._parse_facet_response(response)
+
     async def send_command(self, command: str) -> str:
         """
         Send raw command to server.
@@ -544,25 +628,11 @@ class MygramClient:
 
     def _is_response_complete(self, buffer: str) -> bool:
         """Check if buffer contains a complete response."""
-        # Multi-line responses end with empty line
-        if (
+        ends_with_blank = (
             buffer.endswith("\n\n")
             or buffer.endswith("\r\n\r\n")
             or buffer.endswith("\n\r\n")
-        ):
-            return True
-
-        # Multi-line INFO/CONFIG responses
-        if (
-            "OK INFO\n" in buffer
-            or "OK CONFIG\n" in buffer
-            or buffer.startswith("+OK\n")
-        ):
-            return (
-                buffer.endswith("\n\n")
-                or buffer.endswith("\r\n\r\n")
-                or buffer.endswith("\n\r\n")
-            )
+        )
 
         # Multi-line REPLICATION/DUMP_STATUS/CACHE_STATS responses (end with END marker)
         if (
@@ -578,13 +648,30 @@ class MygramClient:
                 or buffer.endswith("\r\nEND")
             )
 
+        # FACET response (MygramDB v1.6+) - multi-line, terminated by blank line
+        if buffer.startswith("OK FACET ") or buffer.startswith("OK FACET\r"):
+            return ends_with_blank
+
+        # HIGHLIGHT response (MygramDB v1.6+) - SEARCH result with tab-prefixed
+        # snippet payload lines, terminated by blank line
+        if buffer.startswith("OK RESULTS ") and self._buffer_has_highlight_rows(buffer):
+            return ends_with_blank
+
+        # Generic multi-line response terminator
+        if ends_with_blank:
+            return True
+
+        # Multi-line INFO/CONFIG responses
+        if (
+            "OK INFO\n" in buffer
+            or "OK CONFIG\n" in buffer
+            or buffer.startswith("+OK\n")
+        ):
+            return ends_with_blank
+
         # Debug response
         if "# DEBUG" in buffer:
-            return (
-                buffer.endswith("\n\n")
-                or buffer.endswith("\r\n\r\n")
-                or buffer.endswith("\n\r\n")
-            )
+            return ends_with_blank
 
         # Single-line response with newline
         lines = buffer.split("\n")
@@ -594,29 +681,129 @@ class MygramClient:
         return False
 
     @staticmethod
+    def _buffer_has_highlight_rows(buffer: str) -> bool:
+        """
+        Detect HIGHLIGHT-mode SEARCH responses by checking for tab-prefixed
+        payload lines after the count line. Classic single-line responses
+        never contain tabs.
+        """
+        first_line_end = buffer.find("\n")
+        if first_line_end < 0:
+            return False
+        return "\t" in buffer[first_line_end + 1:]
+
+    @staticmethod
     def _parse_search_response(response: str) -> SearchResponse:
-        """Parse SEARCH response."""
+        """
+        Parse SEARCH response.
+
+        Two formats are supported:
+
+        1. Classic (single-line):
+           ``OK RESULTS <total_count> <id1> <id2> ...``
+
+        2. HIGHLIGHT (multi-line, MygramDB v1.6+):
+           ::
+
+               OK RESULTS <total_count>
+               <id1>\\t<snippet1>
+               <id2>\\t<snippet2>
+               ...
+
+        Either format may be followed by a ``# DEBUG`` block.
+        """
         lines = response.split("\n")
         first_line = lines[0]
 
         if not first_line.startswith("OK RESULTS "):
             raise ProtocolError(f"Invalid SEARCH response: {first_line}")
 
-        parts = first_line.split(" ")
-        total_count = int(parts[2])
-        ids = parts[3:]
+        header_parts = first_line.split(" ")
+        total_count = int(header_parts[2])
 
-        results = [SearchResult(primary_key=id_) for id_ in ids]
+        # Collect payload lines that precede an optional # DEBUG block.
+        payload_lines: List[str] = []
+        debug_index = -1
+        for i in range(1, len(lines)):
+            line = lines[i]
+            if line == "# DEBUG":
+                debug_index = i
+                break
+            if line == "":
+                continue
+            payload_lines.append(line)
+
+        results: List[SearchResult]
+        if payload_lines:
+            # HIGHLIGHT mode: each payload line is "<pk>[\t<snippet>]"
+            results = []
+            for line in payload_lines:
+                tab = line.find("\t")
+                if tab < 0:
+                    results.append(SearchResult(primary_key=line, snippet=""))
+                else:
+                    results.append(SearchResult(
+                        primary_key=line[:tab],
+                        snippet=line[tab + 1:],
+                    ))
+        else:
+            # Classic mode: PKs follow the count on the first line
+            ids = header_parts[3:]
+            results = [SearchResult(primary_key=id_) for id_ in ids]
 
         # Parse debug info if present
         debug = None
-        try:
-            debug_index = lines.index("# DEBUG")
+        if debug_index != -1:
             debug = MygramClient._parse_debug_info(lines[debug_index + 1:])
-        except ValueError:
-            pass
 
         return SearchResponse(results=results, total_count=total_count, debug=debug)
+
+    @staticmethod
+    def _parse_facet_response(response: str) -> FacetResponse:
+        """
+        Parse FACET response (MygramDB v1.6+).
+
+        Format::
+
+            OK FACET <num_values>
+            <value1>\\t<count1>
+            <value2>\\t<count2>
+            ...
+
+        Lines starting with ``#`` (debug/comment) are ignored.
+        """
+        lines = response.split("\n")
+        first_line = lines[0]
+
+        if not first_line.startswith("OK FACET"):
+            raise ProtocolError(f"Invalid FACET response: {first_line}")
+
+        header_parts = first_line.split(" ")
+        if len(header_parts) < 3:
+            raise ProtocolError("Invalid FACET response: missing count")
+        try:
+            int(header_parts[2])
+        except ValueError:
+            raise ProtocolError(f"Invalid FACET count: {header_parts[2]}")
+
+        results: List[FacetValue] = []
+        for line in lines[1:]:
+            if line == "" or line.startswith("#"):
+                continue
+            tab = line.find("\t")
+            if tab < 0:
+                raise ProtocolError(f"Invalid FACET row: {line}")
+            value = line[:tab]
+            count_str = line[tab + 1:].strip()
+            try:
+                count = int(count_str)
+            except ValueError:
+                raise ProtocolError(
+                    f"Invalid FACET count for {value}: {count_str}"
+                )
+            results.append(FacetValue(value=value, count=count))
+
+        return FacetResponse(results=results)
 
     @staticmethod
     def _parse_count_response(response: str) -> CountResponse:

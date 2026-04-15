@@ -42,6 +42,10 @@ from .types import (
     DebugInfo,
     Document,
     DumpStatus,
+    FacetOptions,
+    FacetResponse,
+    FacetValue,
+    HighlightOptions,
     ReplicationStatus,
     SearchOptions,
     SearchResponse,
@@ -50,7 +54,7 @@ from .types import (
     SimplifiedExpression,
 )
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = [
     # Client
@@ -60,6 +64,8 @@ __all__ = [
     "ClientConfig",
     "SearchOptions",
     "CountOptions",
+    "HighlightOptions",
+    "FacetOptions",
     # Response types
     "SearchResponse",
     "SearchResult",
@@ -70,6 +76,8 @@ __all__ = [
     "DebugInfo",
     "DumpStatus",
     "CacheStats",
+    "FacetResponse",
+    "FacetValue",
     # Search expression
     "SearchExpression",
     "SimplifiedExpression",

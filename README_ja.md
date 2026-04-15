@@ -8,6 +8,8 @@
 
 [MygramDB](https://github.com/libraz/mygram-db/) 用の Python クライアントライブラリ — MySQL レプリケーションをサポートする高性能インメモリ全文検索エンジン。
 
+> **MygramDB v1.6** 対応（ファジー検索、ハイライト、ファセット、BM25）。
+
 ## 概要
 
 MygramDB は MySQL FULLTEXT の **25〜200倍高速** な全文検索を提供します。このクライアントは MygramDB の TCP テキストプロトコル（memcached スタイル）で通信し、外部依存はゼロです。

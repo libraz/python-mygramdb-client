@@ -3,6 +3,7 @@ import re
 from typing import Dict, List, Optional
 
 from .errors import InputValidationError
+from .types import HighlightOptions
 
 # Control characters: 0x00-0x1F and 0x7F
 CONTROL_CHAR_PATTERN = re.compile(r'[\x00-\x1f\x7f]')
@@ -139,6 +140,94 @@ def validate_table_name(table: str) -> None:
         raise InputValidationError("Table name cannot be empty")
 
     ensure_safe_command_value(table, "table")
+
+
+def validate_fuzzy(distance: int) -> None:
+    """
+    Validate a FUZZY edit distance. Accepts 0 (disables), 1 or 2.
+
+    Args:
+        distance: Fuzzy edit distance.
+
+    Raises:
+        InputValidationError: If distance is outside {0, 1, 2}.
+    """
+    if distance in (0, 1, 2):
+        return
+    raise InputValidationError(
+        f"Invalid fuzzy distance {distance}: must be 0, 1, or 2"
+    )
+
+
+def validate_highlight(highlight: Optional[HighlightOptions]) -> None:
+    """
+    Validate HIGHLIGHT clause options.
+
+    ``open_tag``/``close_tag`` must both be empty or both be set, contain no
+    control or whitespace characters, and ``snippet_len``/``max_fragments`` must
+    fall within the documented ranges.
+
+    Args:
+        highlight: Highlight options to validate (no-op when ``None``).
+
+    Raises:
+        InputValidationError: When options are invalid.
+    """
+    if highlight is None:
+        return
+
+    open_tag = highlight.open_tag or ""
+    close_tag = highlight.close_tag or ""
+    if (open_tag == "") != (close_tag == ""):
+        raise InputValidationError(
+            "highlight open_tag and close_tag must be set together"
+        )
+
+    for name, value in (("highlight.open_tag", open_tag),
+                        ("highlight.close_tag", close_tag)):
+        if value == "":
+            continue
+        ensure_safe_command_value(value, name)
+        for ch in value:
+            if ch == " " or ch == "\t":
+                raise InputValidationError(
+                    f"{name} must not contain whitespace: {value!r}"
+                )
+
+    snippet_len = highlight.snippet_len or 0
+    if snippet_len < 0 or snippet_len > 10000:
+        raise InputValidationError(
+            f"highlight.snippet_len out of range (0..10000): {snippet_len}"
+        )
+
+    max_fragments = highlight.max_fragments or 0
+    if max_fragments < 0 or max_fragments > 100:
+        raise InputValidationError(
+            f"highlight.max_fragments out of range (0..100): {max_fragments}"
+        )
+
+
+def validate_facet_column(column: str) -> None:
+    """
+    Validate a FACET column name.
+
+    Same rules as table names: must be non-empty and contain no control
+    or whitespace characters.
+
+    Args:
+        column: Column name.
+
+    Raises:
+        InputValidationError: If column name is invalid.
+    """
+    if column == "":
+        raise InputValidationError("facet column must not be empty")
+    for ch in column:
+        code = ord(ch)
+        if (0x00 <= code <= 0x1F) or code == 0x7F or ch == " " or ch == "\t":
+            raise InputValidationError(
+                f"facet column contains invalid character: {ch!r}"
+            )
 
 
 def validate_primary_key(primary_key: str) -> None:

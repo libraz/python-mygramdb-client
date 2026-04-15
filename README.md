@@ -8,6 +8,8 @@
 
 Python client library for [MygramDB](https://github.com/libraz/mygram-db/) — a high-performance in-memory full-text search engine with MySQL replication support.
 
+> Compatible with **MygramDB v1.6** (fuzzy search, highlight, facets, BM25).
+
 ## Overview
 
 MygramDB provides **25-200x faster** full-text search than MySQL FULLTEXT. This client communicates via MygramDB's TCP text protocol (memcached-style) with zero external dependencies.
@@ -85,6 +87,35 @@ results = await client.search('articles', expr.main_term, SearchOptions(
     sort_column='created_at',
     sort_desc=True,
 ))
+```
+
+## MygramDB v1.6 Features
+
+```python
+from mygramdb_client import HighlightOptions, FacetOptions, SearchOptions
+
+# BM25 relevance scoring
+result = await client.search('articles', 'python',
+    SearchOptions(sort_column='_score', sort_desc=True))
+
+# Fuzzy search (Levenshtein distance 1 or 2)
+result = await client.search('articles', 'helo',
+    SearchOptions(fuzzy=1))
+
+# Highlighted snippets
+result = await client.search('articles', 'python',
+    SearchOptions(highlight=HighlightOptions(
+        open_tag='<mark>', close_tag='</mark>',
+        snippet_len=150, max_fragments=3,
+    )))
+for r in result.results:
+    print(r.primary_key, r.snippet)
+
+# Facet aggregation
+facets = await client.facet('articles', 'category',
+    FacetOptions(query='python', limit=10))
+for v in facets.results:
+    print(f'{v.value}: {v.count}')
 ```
 
 ## Type Hints
