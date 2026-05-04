@@ -332,8 +332,17 @@ def simplify_search_expression(expression: str) -> SimplifiedExpression:
     """
     Simplify search expression to basic terms.
 
-    For clients that don't support QueryAST, this extracts simple term lists.
-    Complex expressions with OR/grouping will lose semantic meaning.
+    For clients that don't support full QueryAST, this extracts simple term
+    lists. Required (``+``) terms are surfaced as ``main_term`` plus
+    ``and_terms``; OR-only or parenthesized sub-expressions (e.g.
+    ``python OR ruby`` or ``(a OR b)``) are surfaced as a single
+    parenthesized ``main_term`` so the OR semantics survive when the caller
+    AND-composes the result.
+
+    Examples:
+    - ``+golang -old`` -> main_term=``golang``, not_terms=[``old``]
+    - ``python OR ruby`` -> main_term=``(python OR ruby)``
+    - ``(python OR ruby)`` -> main_term=``(python OR ruby)`` (not double-wrapped)
 
     Args:
         expression: Web-style search expression.
@@ -346,13 +355,37 @@ def simplify_search_expression(expression: str) -> SimplifiedExpression:
     """
     expr = parse_search_expression(expression)
 
-    all_positive_terms = expr.required_terms + expr.optional_terms
+    # Complex expression (OR / parenthesized): the optional_terms list
+    # contains the inside of OR sub-expressions, which would lose meaning
+    # if flattened into AND. Surface the raw expression instead.
+    if has_complex_expression(expr):
+        if expr.required_terms:
+            # Mixed (e.g. "+golang (tutorial OR guide)"): keep the required
+            # terms; the OR sub-expression is currently not surfaced.
+            return SimplifiedExpression(
+                main_term=expr.required_terms[0],
+                and_terms=list(expr.required_terms[1:]),
+                not_terms=list(expr.excluded_terms),
+            )
 
+        raw = expr.raw_expression.strip()
+        if raw.startswith("(") and raw.endswith(")"):
+            main_term = raw
+        else:
+            main_term = f"({raw})"
+        return SimplifiedExpression(
+            main_term=main_term,
+            and_terms=[],
+            not_terms=list(expr.excluded_terms),
+        )
+
+    # Simple expression: combine required + optional (the implicit AND case).
+    all_positive_terms = expr.required_terms + expr.optional_terms
     if not all_positive_terms:
         raise ValueError("Search expression must have at least one positive term")
 
     return SimplifiedExpression(
         main_term=all_positive_terms[0],
-        and_terms=all_positive_terms[1:],
-        not_terms=expr.excluded_terms,
+        and_terms=list(all_positive_terms[1:]),
+        not_terms=list(expr.excluded_terms),
     )

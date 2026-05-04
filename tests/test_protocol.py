@@ -97,6 +97,76 @@ class TestLimitSyntax:
         command = " ".join(parts)
         assert command == "LIMIT 1000"
 
+    def test_offset_only_emits_bare_offset(self):
+        """offset > 0 with limit == 0 must emit OFFSET, not silently drop the offset."""
+        import asyncio
+
+        from mygramdb_client import MygramClient, SearchOptions
+
+        client = MygramClient()
+        captured = {}
+
+        async def capture(command):
+            captured["command"] = command
+            return "OK RESULTS 0"
+
+        client._connected = True
+        client.send_command = capture  # type: ignore[assignment]
+
+        async def run():
+            await client.search("articles", "hello", SearchOptions(limit=0, offset=42))
+
+        asyncio.run(run())
+        cmd = captured["command"]
+        assert "OFFSET 42" in cmd
+        assert "LIMIT" not in cmd
+
+    def test_offset_and_limit_emit_combined_form(self):
+        """offset > 0 with limit > 0 emits 'LIMIT offset,limit'."""
+        import asyncio
+
+        from mygramdb_client import MygramClient, SearchOptions
+
+        client = MygramClient()
+        captured = {}
+
+        async def capture(command):
+            captured["command"] = command
+            return "OK RESULTS 0"
+
+        client._connected = True
+        client.send_command = capture  # type: ignore[assignment]
+
+        async def run():
+            await client.search("articles", "hello", SearchOptions(limit=10, offset=20))
+
+        asyncio.run(run())
+        assert "LIMIT 20,10" in captured["command"]
+
+    def test_zero_offset_zero_limit_emits_no_limit(self):
+        """Both zero: no LIMIT/OFFSET clause."""
+        import asyncio
+
+        from mygramdb_client import MygramClient, SearchOptions
+
+        client = MygramClient()
+        captured = {}
+
+        async def capture(command):
+            captured["command"] = command
+            return "OK RESULTS 0"
+
+        client._connected = True
+        client.send_command = capture  # type: ignore[assignment]
+
+        async def run():
+            await client.search("articles", "hello", SearchOptions(limit=0, offset=0))
+
+        asyncio.run(run())
+        cmd = captured["command"]
+        assert "LIMIT" not in cmd
+        assert "OFFSET" not in cmd
+
 
 class TestSortSyntax:
     """Tests for SORT clause generation."""
@@ -551,3 +621,189 @@ class TestOptimizeCommandGeneration:
         else:
             command = "OPTIMIZE"
         assert command == "OPTIMIZE"
+
+
+class TestSearchEmptyAndQuotedQuery:
+    """Tests that the SEARCH/COUNT wire form quotes empty/whitespace tokens."""
+
+    def _capture_search_command(self, query, **opts_kwargs):
+        import asyncio
+
+        from mygramdb_client import MygramClient, SearchOptions
+
+        client = MygramClient()
+        captured = {}
+
+        async def capture(command):
+            captured["command"] = command
+            return "OK RESULTS 0"
+
+        client._connected = True
+        client.send_command = capture  # type: ignore[assignment]
+
+        async def run():
+            await client.search("articles", query, SearchOptions(**opts_kwargs))
+
+        asyncio.run(run())
+        return captured["command"]
+
+    def test_empty_query_emitted_as_quoted_empty_token(self):
+        """Empty query must be emitted as the explicit "" token."""
+        cmd = self._capture_search_command("")
+        # The token between table and the next clause should be ""
+        assert 'SEARCH articles ""' in cmd
+
+    def test_query_with_space_is_quoted(self):
+        cmd = self._capture_search_command("hello world", limit=10)
+        assert 'SEARCH articles "hello world"' in cmd
+
+    def test_filter_value_with_space_is_quoted(self):
+        cmd = self._capture_search_command(
+            "hi",
+            limit=10,
+            filters={"title": "hello world"},
+        )
+        assert 'FILTER title = "hello world"' in cmd
+
+    def test_and_term_with_space_is_quoted(self):
+        cmd = self._capture_search_command(
+            "hi",
+            limit=10,
+            and_terms=["machine learning"],
+        )
+        assert 'AND "machine learning"' in cmd
+
+
+class TestReplicationStatusExtraFields:
+    """ReplicationStatus parses processed_events and queue_size."""
+
+    def test_parse_processed_events_and_queue_size(self):
+        from mygramdb_client import MygramClient
+
+        response = """OK REPLICATION
+status: running
+current_gtid: xyz789
+processed_events: 1234
+queue_size: 5
+END"""
+        result = MygramClient._parse_replication_status_response(response)
+
+        assert result.running is True
+        assert result.gtid == "xyz789"
+        assert result.processed_events == 1234
+        assert result.queue_size == 5
+
+    def test_processed_events_defaults_to_zero(self):
+        from mygramdb_client import MygramClient
+
+        response = """OK REPLICATION
+status: running
+current_gtid: abc
+END"""
+        result = MygramClient._parse_replication_status_response(response)
+        assert result.processed_events == 0
+        assert result.queue_size == 0
+
+    def test_gtid_key_alias_accepted(self):
+        """The server may emit `gtid:` instead of `current_gtid:`."""
+        from mygramdb_client import MygramClient
+
+        response = """OK REPLICATION
+status: stopped
+gtid: aaa-bbb
+END"""
+        result = MygramClient._parse_replication_status_response(response)
+        assert result.gtid == "aaa-bbb"
+        assert result.running is False
+
+
+class TestEndTerminatedResponseDetection:
+    """First-line prefix detection for END-terminated multi-line responses."""
+
+    def test_dump_info_with_filepath_complete(self):
+        """OK DUMP_INFO carries an optional filepath suffix; END-terminated."""
+        from mygramdb_client import MygramClient
+
+        client = MygramClient()
+        buffer = "OK DUMP_INFO /backup/dump.dmp\r\nversion: 2\r\nEND\r\n"
+        assert client._is_response_complete(buffer)
+
+    def test_dump_info_incomplete(self):
+        from mygramdb_client import MygramClient
+
+        client = MygramClient()
+        buffer = "OK DUMP_INFO /backup/dump.dmp\r\nversion: 2\r\n"
+        assert not client._is_response_complete(buffer)
+
+    def test_info_requires_end_marker(self):
+        """OK INFO is terminated by END\\r\\n (not the previous \\r\\n\\r\\n heuristic)."""
+        from mygramdb_client import MygramClient
+
+        client = MygramClient()
+        complete = "OK INFO\r\nversion: 1.0\r\nEND\r\n"
+        assert client._is_response_complete(complete)
+
+    def test_first_line_prefix_match_does_not_match_substring(self):
+        """A response whose first line is *not* OK DUMP_STATUS must not be
+        treated as DUMP_STATUS just because the substring appears later."""
+        from mygramdb_client import MygramClient
+
+        client = MygramClient()
+        # First line is OK RESULTS, not OK DUMP_STATUS
+        buffer = "OK RESULTS 1 OK_DUMP_STATUS_pk\r\n"
+        # This must fall through to single-line handling, not require END
+        # (it is a terminated single-line response)
+        # Without trailing newline it shouldn't be considered complete via END,
+        # but it does end with \r\n and thus is a complete single-line response.
+        assert client._is_response_complete(buffer) is True
+
+    def test_dump_status_substring_in_middle_does_not_trigger(self):
+        """The previous loose `in buffer` check would treat any buffer that
+        contained the substring "OK DUMP_STATUS" as DUMP_STATUS. The new
+        first-line-only match must not."""
+        from mygramdb_client import MygramClient
+
+        client = MygramClient()
+        # First line is OK RESULTS; OK DUMP_STATUS appears as PK by accident
+        # Buffer ends with \r\n\r\n which is a generic blank-line terminator
+        buffer = "OK RESULTS 1 OK_DUMP_STATUS_pk\r\n\r\n"
+        assert client._is_response_complete(buffer) is True
+
+
+class TestSendCommandSerialization:
+    """Concurrent send_command calls must not interleave on the wire."""
+
+    def test_command_lock_serializes_concurrent_calls(self):
+        """Two coroutines that both call send_command must run sequentially.
+
+        Use the lock directly: while one task holds the command lock the
+        other must not be able to enter the critical section.
+        """
+        import asyncio
+
+        from mygramdb_client import MygramClient
+
+        client = MygramClient()
+
+        async def run():
+            lock = client._get_command_lock()
+            log = []
+
+            async def worker(name):
+                async with lock:
+                    log.append(("enter", name))
+                    await asyncio.sleep(0.01)
+                    log.append(("exit", name))
+
+            await asyncio.gather(worker("a"), worker("b"))
+            return log
+
+        log = asyncio.run(run())
+        # Verify strict serialization: each enter is followed by its own exit
+        # before the next enter.
+        for i in range(0, len(log), 2):
+            enter_name = log[i][1]
+            exit_name = log[i + 1][1]
+            assert log[i][0] == "enter"
+            assert log[i + 1][0] == "exit"
+            assert enter_name == exit_name

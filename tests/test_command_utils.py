@@ -7,7 +7,9 @@ from mygramdb_client.command_utils import (
     ensure_safe_command_value,
     ensure_safe_filters,
     ensure_safe_string_array,
+    escape_query_string,
     has_control_characters,
+    validate_identifier,
     validate_primary_key,
     validate_table_name,
 )
@@ -168,3 +170,108 @@ class TestNewMethodInputValidation:
     def test_table_for_optimize_with_control_char_rejected(self):
         with pytest.raises(InputValidationError, match="contains invalid"):
             ensure_safe_command_value("table\x00name", "table")
+
+
+class TestValidateIdentifier:
+    """Tests for validate_identifier."""
+
+    def test_valid_identifier_passes(self):
+        validate_identifier("articles", "table name")
+
+    def test_unicode_identifier_passes(self):
+        validate_identifier("記事", "table name")
+
+    def test_empty_identifier_rejected(self):
+        with pytest.raises(InputValidationError, match="is empty"):
+            validate_identifier("", "table name")
+
+    def test_space_rejected(self):
+        with pytest.raises(InputValidationError, match="whitespace"):
+            validate_identifier("my table", "table name")
+
+    def test_leading_space_rejected(self):
+        with pytest.raises(InputValidationError, match="whitespace"):
+            validate_identifier(" table", "table name")
+
+    def test_trailing_space_rejected(self):
+        with pytest.raises(InputValidationError, match="whitespace"):
+            validate_identifier("table ", "table name")
+
+    def test_tab_rejected(self):
+        # Tab is a control character (0x09); rejected with control-char error
+        with pytest.raises(InputValidationError, match="control character"):
+            validate_identifier("a\tb", "table name")
+
+    def test_newline_rejected(self):
+        with pytest.raises(InputValidationError, match="control character"):
+            validate_identifier("a\nb", "table name")
+
+    def test_carriage_return_rejected(self):
+        with pytest.raises(InputValidationError, match="control character"):
+            validate_identifier("a\rb", "table name")
+
+    def test_null_byte_rejected(self):
+        with pytest.raises(InputValidationError, match="control character"):
+            validate_identifier("a\x00b", "table name")
+
+    def test_field_name_appears_in_error(self):
+        with pytest.raises(InputValidationError, match="filter key"):
+            validate_identifier("a b", "filter key")
+
+
+class TestValidateTableNameWhitespace:
+    """validate_table_name should reject whitespace."""
+
+    def test_table_with_space_rejected(self):
+        with pytest.raises(InputValidationError, match="whitespace"):
+            validate_table_name("my table")
+
+    def test_table_with_tab_rejected(self):
+        # Tab is rejected as a control character before the whitespace check
+        with pytest.raises(InputValidationError, match="control"):
+            validate_table_name("my\ttable")
+
+
+class TestValidatePrimaryKeyWhitespace:
+    """validate_primary_key should reject whitespace."""
+
+    def test_primary_key_with_space_rejected(self):
+        with pytest.raises(InputValidationError, match="whitespace"):
+            validate_primary_key("pk 1")
+
+
+class TestEscapeQueryString:
+    """Tests for escape_query_string."""
+
+    def test_empty_string_returns_double_quote_pair(self):
+        assert escape_query_string("") == '""'
+
+    def test_simple_word_unchanged(self):
+        assert escape_query_string("hello") == "hello"
+
+    def test_unicode_unchanged(self):
+        assert escape_query_string("こんにちは") == "こんにちは"
+
+    def test_value_with_space_quoted(self):
+        assert escape_query_string("hello world") == '"hello world"'
+
+    def test_value_with_double_quote_escaped(self):
+        # Internal double quotes must be backslash-escaped
+        assert escape_query_string('say "hi"') == '"say \\"hi\\""'
+
+    def test_value_with_single_quote_quoted(self):
+        # Single quotes also force quoting (server tokenizer)
+        assert escape_query_string("it's") == "\"it's\""
+
+    def test_control_chars_stripped_when_quoted(self):
+        # When quoting is forced, control chars are dropped to prevent injection
+        result = escape_query_string("a\x00b c")
+        assert "\x00" not in result
+        assert result == '"ab c"'
+
+    def test_backslash_escaped(self):
+        assert escape_query_string('a\\b c') == '"a\\\\b c"'
+
+    def test_tab_triggers_quoting(self):
+        result = escape_query_string("a\tb")
+        assert result.startswith('"') and result.endswith('"')

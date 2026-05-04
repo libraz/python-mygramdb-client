@@ -11,9 +11,11 @@ from .command_utils import (
     ensure_safe_command_value,
     ensure_safe_filters,
     ensure_safe_string_array,
+    escape_query_string,
     validate_facet_column,
     validate_fuzzy,
     validate_highlight,
+    validate_identifier,
 )
 from .errors import ConnectionError, ProtocolError, ServerError, TimeoutError
 from .types import (
@@ -60,6 +62,16 @@ class MygramClient:
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
         self._connected = False
+        # Serializes concurrent send_command calls: a single TCP connection
+        # carries one request/response stream, and interleaved writes/reads
+        # would corrupt the protocol. Lazily created on first acquisition so
+        # the construction does not require a running event loop.
+        self._command_lock: Optional[asyncio.Lock] = None
+
+    def _get_command_lock(self) -> asyncio.Lock:
+        if self._command_lock is None:
+            self._command_lock = asyncio.Lock()
+        return self._command_lock
 
     async def __aenter__(self) -> "MygramClient":
         """Async context manager entry."""
@@ -139,14 +151,16 @@ class MygramClient:
         """
         opts = options or SearchOptions()
 
-        ensure_safe_command_value(table, "table")
+        validate_identifier(table, "table name")
         ensure_safe_command_value(query, "query")
         ensure_safe_string_array(opts.and_terms, "and_terms")
         ensure_safe_string_array(opts.not_terms, "not_terms")
         ensure_safe_filters(opts.filters)
+        for key in opts.filters:
+            validate_identifier(key, "filter key")
 
         if opts.sort_column:
-            ensure_safe_command_value(opts.sort_column, "sort_column")
+            validate_identifier(opts.sort_column, "sort column")
 
         validate_fuzzy(opts.fuzzy)
         validate_highlight(opts.highlight)
@@ -158,19 +172,19 @@ class MygramClient:
             opts.not_terms,
         )
 
-        parts: List[str] = ["SEARCH", table, query]
+        parts: List[str] = ["SEARCH", table, escape_query_string(query)]
 
         # Add AND terms
         for term in opts.and_terms:
-            parts.extend(["AND", term])
+            parts.extend(["AND", escape_query_string(term)])
 
         # Add NOT terms
         for term in opts.not_terms:
-            parts.extend(["NOT", term])
+            parts.extend(["NOT", escape_query_string(term)])
 
         # Add filters
         for key, value in opts.filters.items():
-            parts.extend(["FILTER", key, "=", value])
+            parts.extend(["FILTER", key, "=", escape_query_string(value)])
 
         # Add sort (use _score for BM25 in MygramDB v1.6+)
         if opts.sort_column:
@@ -193,9 +207,13 @@ class MygramClient:
                 parts.extend(["MAX_FRAGMENTS", str(opts.highlight.max_fragments)])
 
         # Add limit and offset
-        if opts.offset > 0:
+        if opts.offset > 0 and opts.limit > 0:
             parts.extend(["LIMIT", f"{opts.offset},{opts.limit}"])
-        else:
+        elif opts.offset > 0:
+            # offset > 0 with limit == 0: emit bare OFFSET so the server
+            # actually skips records instead of returning the first page
+            parts.extend(["OFFSET", str(opts.offset)])
+        elif opts.limit > 0:
             parts.extend(["LIMIT", str(opts.limit)])
 
         response = await self.send_command(" ".join(parts))
@@ -225,11 +243,13 @@ class MygramClient:
         """
         opts = options or CountOptions()
 
-        ensure_safe_command_value(table, "table")
+        validate_identifier(table, "table name")
         ensure_safe_command_value(query, "query")
         ensure_safe_string_array(opts.and_terms, "and_terms")
         ensure_safe_string_array(opts.not_terms, "not_terms")
         ensure_safe_filters(opts.filters)
+        for key in opts.filters:
+            validate_identifier(key, "filter key")
 
         ensure_query_length_within_limit(
             query,
@@ -238,19 +258,19 @@ class MygramClient:
             opts.not_terms,
         )
 
-        parts: List[str] = ["COUNT", table, query]
+        parts: List[str] = ["COUNT", table, escape_query_string(query)]
 
         # Add AND terms
         for term in opts.and_terms:
-            parts.extend(["AND", term])
+            parts.extend(["AND", escape_query_string(term)])
 
         # Add NOT terms
         for term in opts.not_terms:
-            parts.extend(["NOT", term])
+            parts.extend(["NOT", escape_query_string(term)])
 
         # Add filters
         for key, value in opts.filters.items():
-            parts.extend(["FILTER", key, "=", value])
+            parts.extend(["FILTER", key, "=", escape_query_string(value)])
 
         response = await self.send_command(" ".join(parts))
         return self._parse_count_response(response)
@@ -271,8 +291,8 @@ class MygramClient:
             TimeoutError: If command times out.
             ProtocolError: If server returns an error.
         """
-        ensure_safe_command_value(table, "table")
-        ensure_safe_command_value(primary_key, "primary_key")
+        validate_identifier(table, "table name")
+        validate_identifier(primary_key, "primary key")
 
         response = await self.send_command(f"GET {table} {primary_key}")
         return self._parse_document_response(response)
@@ -529,13 +549,15 @@ class MygramClient:
         """
         opts = options or FacetOptions()
 
-        ensure_safe_command_value(table, "table")
+        validate_identifier(table, "table name")
         validate_facet_column(column)
         if opts.query:
             ensure_safe_command_value(opts.query, "query")
         ensure_safe_string_array(opts.and_terms, "and_terms")
         ensure_safe_string_array(opts.not_terms, "not_terms")
         ensure_safe_filters(opts.filters)
+        for key in opts.filters:
+            validate_identifier(key, "filter key")
         ensure_query_length_within_limit(
             opts.query,
             self.config.max_query_length,
@@ -546,13 +568,13 @@ class MygramClient:
         parts: List[str] = ["FACET", table, column]
 
         if opts.query:
-            parts.extend(["QUERY", opts.query])
+            parts.extend(["QUERY", escape_query_string(opts.query)])
             for term in opts.and_terms:
-                parts.extend(["AND", term])
+                parts.extend(["AND", escape_query_string(term)])
             for term in opts.not_terms:
-                parts.extend(["NOT", term])
+                parts.extend(["NOT", escape_query_string(term)])
             for key, value in opts.filters.items():
-                parts.extend(["FILTER", key, "=", value])
+                parts.extend(["FILTER", key, "=", escape_query_string(value)])
 
         if opts.limit > 0:
             parts.extend(["LIMIT", str(opts.limit)])
@@ -581,28 +603,29 @@ class MygramClient:
         if not self._connected or not self._writer or not self._reader:
             raise ConnectionError("Not connected to server")
 
-        try:
-            # Send command
-            self._writer.write(f"{command}\r\n".encode("utf-8"))
-            await self._writer.drain()
+        async with self._get_command_lock():
+            try:
+                # Send command
+                self._writer.write(f"{command}\r\n".encode("utf-8"))
+                await self._writer.drain()
 
-            # Read response
-            response = await self._read_response()
+                # Read response
+                response = await self._read_response()
 
-            # Normalize CRLF to LF
-            response = response.replace("\r\n", "\n").strip()
+                # Normalize CRLF to LF
+                response = response.replace("\r\n", "\n").strip()
 
-            # Check for error response
-            if response.startswith("ERROR "):
-                raise ServerError(response[6:])
+                # Check for error response
+                if response.startswith("ERROR "):
+                    raise ServerError(response[6:])
 
-            return response
+                return response
 
-        except asyncio.TimeoutError:
-            raise TimeoutError("Command timeout")
-        except OSError as e:
-            self._connected = False
-            raise ConnectionError(f"Connection error: {e}")
+            except asyncio.TimeoutError:
+                raise TimeoutError("Command timeout")
+            except OSError as e:
+                self._connected = False
+                raise ConnectionError(f"Connection error: {e}")
 
     async def _read_response(self) -> str:
         """Read complete response from server."""
@@ -626,6 +649,18 @@ class MygramClient:
             if self._is_response_complete(buffer):
                 return buffer
 
+    # Multi-line response prefixes that terminate with "END\r\n" (or "END\n").
+    # Matched against the first line of the buffer; the suffix is the value
+    # ``True`` when the prefix is exact and ``False`` when a trailing payload
+    # (e.g. filepath after "OK DUMP_INFO ") is allowed.
+    _END_TERMINATED_PREFIXES = (
+        ("OK INFO", True),
+        ("OK REPLICATION", True),
+        ("OK CACHE_STATS", True),
+        ("OK DUMP_STATUS", True),
+        ("OK DUMP_INFO", False),
+    )
+
     def _is_response_complete(self, buffer: str) -> bool:
         """Check if buffer contains a complete response."""
         ends_with_blank = (
@@ -634,22 +669,28 @@ class MygramClient:
             or buffer.endswith("\n\r\n")
         )
 
-        # Multi-line REPLICATION/DUMP_STATUS/CACHE_STATS responses (end with END marker)
-        if (
-            buffer.startswith("OK REPLICATION\n")
-            or buffer.startswith("OK REPLICATION\r\n")
-            or "OK DUMP_STATUS" in buffer
-            or "OK CACHE_STATS" in buffer
-        ):
-            return (
-                "\nEND\n" in buffer
-                or "\nEND\r\n" in buffer
-                or buffer.endswith("\nEND")
-                or buffer.endswith("\r\nEND")
-            )
+        ends_with_end_marker = (
+            "\nEND\n" in buffer
+            or "\nEND\r\n" in buffer
+            or buffer.endswith("\nEND")
+            or buffer.endswith("\r\nEND")
+        )
+
+        # First-line prefix detection for END-terminated multi-line responses
+        # (INFO, REPLICATION, CACHE_STATS, DUMP_STATUS, DUMP_INFO).
+        first_line = self._extract_first_line(buffer)
+        if first_line is not None:
+            for prefix, exact in self._END_TERMINATED_PREFIXES:
+                if exact:
+                    if first_line == prefix:
+                        return ends_with_end_marker
+                else:
+                    # Prefix may be followed by a space + payload (e.g. filepath)
+                    if first_line == prefix or first_line.startswith(prefix + " "):
+                        return ends_with_end_marker
 
         # FACET response (MygramDB v1.6+) - multi-line, terminated by blank line
-        if buffer.startswith("OK FACET ") or buffer.startswith("OK FACET\r"):
+        if buffer.startswith("OK FACET ") or buffer.startswith("OK FACET\r") or buffer.startswith("OK FACET\n"):
             return ends_with_blank
 
         # HIGHLIGHT response (MygramDB v1.6+) - SEARCH result with tab-prefixed
@@ -657,17 +698,13 @@ class MygramClient:
         if buffer.startswith("OK RESULTS ") and self._buffer_has_highlight_rows(buffer):
             return ends_with_blank
 
+        # CONFIG (+OK ...) terminated by blank line
+        if buffer.startswith("+OK"):
+            return ends_with_blank
+
         # Generic multi-line response terminator
         if ends_with_blank:
             return True
-
-        # Multi-line INFO/CONFIG responses
-        if (
-            "OK INFO\n" in buffer
-            or "OK CONFIG\n" in buffer
-            or buffer.startswith("+OK\n")
-        ):
-            return ends_with_blank
 
         # Debug response
         if "# DEBUG" in buffer:
@@ -679,6 +716,18 @@ class MygramClient:
             return True
 
         return False
+
+    @staticmethod
+    def _extract_first_line(buffer: str) -> Optional[str]:
+        """Return the first line of the buffer (without CR/LF), or None."""
+        # Find first \r\n or \n
+        idx_crlf = buffer.find("\r\n")
+        idx_lf = buffer.find("\n")
+        if idx_crlf == -1 and idx_lf == -1:
+            return None
+        if idx_crlf != -1 and (idx_lf == -1 or idx_crlf <= idx_lf):
+            return buffer[:idx_crlf]
+        return buffer[:idx_lf]
 
     @staticmethod
     def _buffer_has_highlight_rows(buffer: str) -> bool:
@@ -905,6 +954,8 @@ class MygramClient:
             # Multi-line format
             running = False
             gtid = ""
+            processed_events = 0
+            queue_size = 0
 
             for line in lines[1:]:
                 trimmed = line.strip()
@@ -920,10 +971,26 @@ class MygramClient:
 
                 if key == "status":
                     running = value == "running"
-                elif key == "current_gtid":
+                elif key in ("current_gtid", "gtid"):
                     gtid = value
+                elif key == "processed_events":
+                    try:
+                        processed_events = int(value)
+                    except ValueError:
+                        pass
+                elif key == "queue_size":
+                    try:
+                        queue_size = int(value)
+                    except ValueError:
+                        pass
 
-            return ReplicationStatus(running=running, gtid=gtid, status_str=response)
+            return ReplicationStatus(
+                running=running,
+                gtid=gtid,
+                status_str=response,
+                processed_events=processed_events,
+                queue_size=queue_size,
+            )
 
         # Single-line format: OK REPLICATION status=running gtid=xxx
         parts = response[15:].split(" ")

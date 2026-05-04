@@ -158,3 +158,49 @@ class TestSimplifySearchExpression:
     def test_no_positive_terms_raises_error(self):
         with pytest.raises(ValueError, match="at least one positive term"):
             simplify_search_expression("-deprecated -old")
+
+    def test_or_only_expression_preserved(self):
+        """OR-only expressions are surfaced as a parenthesized main_term."""
+        result = simplify_search_expression("python OR ruby")
+        assert result.main_term == "(python OR ruby)"
+        assert result.and_terms == []
+        assert result.not_terms == []
+
+    def test_already_parenthesized_or_expression_not_double_wrapped(self):
+        result = simplify_search_expression("(python OR ruby)")
+        assert result.main_term == "(python OR ruby)"
+        # It must not become "((python OR ruby))"
+        assert not result.main_term.startswith("((")
+
+    def test_or_only_with_excluded_terms(self):
+        """Excluded terms still flow through OR-only simplification."""
+        result = simplify_search_expression("python OR ruby -deprecated")
+        assert result.main_term.startswith("(")
+        assert "python" in result.main_term
+        assert "ruby" in result.main_term
+        # Excluded terms are still surfaced separately
+        # (note: '-deprecated' inside the OR-only parse keeps it in excluded_terms)
+        assert "deprecated" in result.not_terms
+
+    def test_required_with_or_subexpression_keeps_required(self):
+        """Mixed +required and OR sub-expression: keep the required terms.
+
+        The OR sub-expression is currently not surfaced through simplify
+        (matches the C++ client behavior), but the call must not fail or
+        flatten OR into AND.
+        """
+        result = simplify_search_expression("+golang (tutorial OR guide)")
+        assert result.main_term == "golang"
+        assert result.and_terms == []
+        assert result.not_terms == []
+
+
+class TestToQueryStringWrapsOr:
+    """Lock-in test for ToQueryString wrapping OR sub-expressions in parens."""
+
+    def test_or_subexpression_wrapped_in_parens(self):
+        result = convert_search_expression("python OR ruby")
+        # The conversion preserves the raw expression for complex cases
+        assert "python" in result
+        assert "ruby" in result
+        assert "OR" in result

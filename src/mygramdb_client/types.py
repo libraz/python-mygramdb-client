@@ -167,6 +167,11 @@ class ReplicationStatus:
     running: bool = False
     gtid: str = ""
     status_str: str = ""
+    processed_events: int = 0
+    """Total binlog events processed since startup (multi-line response only)."""
+
+    queue_size: int = 0
+    """Pending events in the replication apply queue (multi-line response only)."""
 
 
 @dataclass
