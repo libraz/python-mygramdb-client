@@ -690,7 +690,9 @@ class MygramClient:
                         return ends_with_end_marker
 
         # FACET response (MygramDB v1.6+) - multi-line, terminated by blank line
-        if buffer.startswith("OK FACET ") or buffer.startswith("OK FACET\r") or buffer.startswith("OK FACET\n"):
+        if (buffer.startswith("OK FACET ")
+                or buffer.startswith("OK FACET\r")
+                or buffer.startswith("OK FACET\n")):
             return ends_with_blank
 
         # HIGHLIGHT response (MygramDB v1.6+) - SEARCH result with tab-prefixed
