@@ -16,6 +16,7 @@ from mygramdb_client import (
     SearchOptions,
 )
 from mygramdb_client.command_utils import (
+    MAX_HIGHLIGHT_TAG_BYTES,
     validate_facet_column,
     validate_fuzzy,
     validate_highlight,
@@ -106,6 +107,27 @@ class TestValidateHighlight:
     def test_max_fragments_negative_rejected(self):
         with pytest.raises(InputValidationError, match="max_fragments"):
             validate_highlight(HighlightOptions(max_fragments=-1))
+
+    def test_open_tag_at_byte_cap_valid(self):
+        tag = "a" * MAX_HIGHLIGHT_TAG_BYTES
+        validate_highlight(HighlightOptions(open_tag=tag, close_tag="</em>"))
+
+    def test_open_tag_over_byte_cap_rejected(self):
+        tag = "a" * (MAX_HIGHLIGHT_TAG_BYTES + 1)
+        with pytest.raises(InputValidationError, match="open_tag.*256 bytes"):
+            validate_highlight(HighlightOptions(open_tag=tag, close_tag="</em>"))
+
+    def test_close_tag_over_byte_cap_rejected(self):
+        tag = "a" * (MAX_HIGHLIGHT_TAG_BYTES + 1)
+        with pytest.raises(InputValidationError, match="close_tag.*256 bytes"):
+            validate_highlight(HighlightOptions(open_tag="<em>", close_tag=tag))
+
+    def test_tag_byte_cap_counts_utf8_bytes_not_chars(self):
+        # Each U+3042 (HIRAGANA LETTER A) is 3 bytes in UTF-8, so 86 chars = 258 bytes,
+        # which exceeds the 256-byte cap even though the character count is small.
+        tag = "あ" * 86
+        with pytest.raises(InputValidationError, match="open_tag.*256 bytes"):
+            validate_highlight(HighlightOptions(open_tag=tag, close_tag="</em>"))
 
 
 class TestValidateFacetColumn:

@@ -18,7 +18,12 @@ from mygramdb_client import (
     SearchOptions,
     simplify_search_expression,
 )
-from mygramdb_client.errors import ProtocolError
+from mygramdb_client.errors import ProtocolError, ServerError
+
+# Server-side gating errors (e.g. HIGHLIGHT requires verify_text, FACET requires
+# a faceted column) surface as ServerError; legacy server builds emit raw
+# protocol errors. Either is a valid round-trip of the new clause.
+_OPTIONAL_FEATURE_ERRORS = (ProtocolError, ServerError)
 
 TEST_HOST = os.environ.get("MYGRAM_HOST", "127.0.0.1")
 TEST_PORT = int(os.environ.get("MYGRAM_PORT", "11016"))
@@ -419,8 +424,8 @@ class TestV16Features:
 
     Some features require specific server configuration (e.g. HIGHLIGHT/
     _score require ``memory.verify_text: ascii|all``). Tests wrap optional
-    features in try/except ``ProtocolError`` so they pass even if the
-    server is running with defaults.
+    features in try/except ``_OPTIONAL_FEATURE_ERRORS`` (ProtocolError or
+    ServerError) so they pass even if the server is running with defaults.
     """
 
     async def test_fuzzy_distance_one(self, client):
@@ -457,7 +462,7 @@ class TestV16Features:
                 table, "hello",
                 SearchOptions(highlight=HighlightOptions()),
             )
-        except ProtocolError as e:
+        except _OPTIONAL_FEATURE_ERRORS as e:
             pytest.skip(f"HIGHLIGHT not supported: {e}")
 
         assert result is not None
@@ -481,7 +486,7 @@ class TestV16Features:
                     max_fragments=2,
                 )),
             )
-        except ProtocolError as e:
+        except _OPTIONAL_FEATURE_ERRORS as e:
             pytest.skip(f"HIGHLIGHT not supported: {e}")
 
         assert result is not None
@@ -498,7 +503,7 @@ class TestV16Features:
                 table, "hello",
                 SearchOptions(sort_column="_score", sort_desc=True),
             )
-        except ProtocolError as e:
+        except _OPTIONAL_FEATURE_ERRORS as e:
             pytest.skip(f"_score sort not supported: {e}")
 
         assert result is not None
@@ -513,7 +518,7 @@ class TestV16Features:
         try:
             # We don't know which columns are facetable, try a common one
             result = await client.facet(table, "status")
-        except ProtocolError as e:
+        except _OPTIONAL_FEATURE_ERRORS as e:
             pytest.skip(f"FACET not supported or column not faceted: {e}")
 
         assert result is not None
@@ -530,7 +535,7 @@ class TestV16Features:
                 table, "status",
                 FacetOptions(query="test", limit=10),
             )
-        except ProtocolError as e:
+        except _OPTIONAL_FEATURE_ERRORS as e:
             pytest.skip(f"FACET not supported or column not faceted: {e}")
 
         assert result is not None

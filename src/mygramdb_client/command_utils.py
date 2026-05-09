@@ -14,6 +14,11 @@ _IDENTIFIER_WHITESPACE = (" ", "\t", "\n", "\r", "\v", "\f")
 # Characters that force a query/value to be quoted on the wire
 _QUOTE_TRIGGER_CHARS = frozenset({" ", "\t", "\n", "\r", '"', "'"})
 
+# Maximum byte length for HIGHLIGHT open_tag / close_tag values. Mirrors the
+# server-side cap (kMaxHighlightTagLength) introduced to prevent response-size
+# amplification from crafted tag values.
+MAX_HIGHLIGHT_TAG_BYTES = 256
+
 
 def has_control_characters(value: str) -> bool:
     """Check if a string contains control characters."""
@@ -241,8 +246,9 @@ def validate_highlight(highlight: Optional[HighlightOptions]) -> None:
     Validate HIGHLIGHT clause options.
 
     ``open_tag``/``close_tag`` must both be empty or both be set, contain no
-    control or whitespace characters, and ``snippet_len``/``max_fragments`` must
-    fall within the documented ranges.
+    control or whitespace characters, and each must be at most
+    ``MAX_HIGHLIGHT_TAG_BYTES`` (256) bytes when UTF-8 encoded.
+    ``snippet_len``/``max_fragments`` must fall within the documented ranges.
 
     Args:
         highlight: Highlight options to validate (no-op when ``None``).
@@ -270,6 +276,12 @@ def validate_highlight(highlight: Optional[HighlightOptions]) -> None:
                 raise InputValidationError(
                     f"{name} must not contain whitespace: {value!r}"
                 )
+        encoded_len = len(value.encode("utf-8"))
+        if encoded_len > MAX_HIGHLIGHT_TAG_BYTES:
+            raise InputValidationError(
+                f"{name} must not exceed {MAX_HIGHLIGHT_TAG_BYTES} bytes "
+                f"(got {encoded_len})"
+            )
 
     snippet_len = highlight.snippet_len or 0
     if snippet_len < 0 or snippet_len > 10000:

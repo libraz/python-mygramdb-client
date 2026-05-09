@@ -7,11 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-05-09
+
 ### Added
 
 - `validate_identifier` and `escape_query_string` helpers in `command_utils`
 - `ReplicationStatus.processed_events` and `ReplicationStatus.queue_size`
   fields, populated from the multi-line REPLICATION STATUS response
+- `MAX_HIGHLIGHT_TAG_BYTES` (256) cap on `HighlightOptions.open_tag` and
+  `close_tag`, mirroring the server-side `kMaxHighlightTagLength` limit
+  introduced in MygramDB v1.6.1 to prevent response-size amplification
 - 44 new unit tests covering identifier validation, query escaping,
   OFFSET-only emission, OR-only/parenthesized expression simplification,
   REPLICATION extra fields, response-completeness detection, and
@@ -29,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of a malformed one with collapsed whitespace
 - `SearchOptions.offset > 0` with `limit == 0` now emits a bare
   `OFFSET <n>` clause; previously the offset was silently dropped
+- `validate_highlight` now rejects `open_tag` / `close_tag` values whose
+  UTF-8 encoding exceeds 256 bytes, matching the server cap
 - `MygramClient.send_command` is now serialized via an internal
   `asyncio.Lock`, so concurrent calls on the same client no longer
   interleave bytes on the wire
@@ -83,6 +90,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Input validation and error handling
 - Full type hints with dataclasses
 
-[Unreleased]: https://github.com/libraz/python-mygramdb-client/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/libraz/python-mygramdb-client/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/libraz/python-mygramdb-client/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/libraz/python-mygramdb-client/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/libraz/python-mygramdb-client/releases/tag/v1.0.0
