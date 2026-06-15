@@ -75,6 +75,29 @@ class SearchOptions:
 
 
 @dataclass
+class SearchRawOptions:
+    """
+    Options for :meth:`MygramClient.search_raw` (MygramDB v1.7+).
+
+    Unlike :class:`SearchOptions`, a raw search sends a pre-built boolean
+    expression as a single token, so it exposes only pagination and highlight
+    controls — AND/NOT/FILTER refinements belong inside the expression itself.
+    """
+
+    limit: int = 0
+    """Maximum number of results to return (0 = server default)."""
+
+    offset: int = 0
+    """Result offset for pagination."""
+
+    highlight: Optional[HighlightOptions] = None
+    """
+    HIGHLIGHT clause options. Pass an empty ``HighlightOptions()`` to enable
+    highlighting with server defaults.
+    """
+
+
+@dataclass
 class CountOptions:
     """Options for count queries."""
 

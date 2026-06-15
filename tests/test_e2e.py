@@ -16,6 +16,8 @@ from mygramdb_client import (
     HighlightOptions,
     MygramClient,
     SearchOptions,
+    SearchRawOptions,
+    convert_search_expression,
     simplify_search_expression,
 )
 from mygramdb_client.errors import ProtocolError, ServerError
@@ -27,6 +29,11 @@ _OPTIONAL_FEATURE_ERRORS = (ProtocolError, ServerError)
 
 TEST_HOST = os.environ.get("MYGRAM_HOST", "127.0.0.1")
 TEST_PORT = int(os.environ.get("MYGRAM_PORT", "11016"))
+
+# Set to "1" by tests/docker/run-e2e.sh, which boots a server seeded with the
+# fixed dataset in tests/docker/mysql-init. Only then can we assert exact result
+# sets; against an arbitrary developer server these are skipped.
+SEEDED = os.environ.get("MYGRAM_E2E_SEEDED") == "1"
 
 
 async def is_server_available() -> bool:
@@ -561,3 +568,142 @@ class TestAsyncContextManagerE2E:
             assert client.is_connected() is True
 
         assert client.is_connected() is False
+
+
+class TestV17Features:
+    """
+    Version-agnostic round-trip tests for MygramDB v1.7 features.
+
+    These run against any reachable server (no seed required); they assert that
+    each new command frames and parses cleanly, tolerating server rejections
+    (immutable variables, missing table) as long as the protocol round-trips.
+    """
+
+    async def test_database_qualified_identity_matches_bare(self, client):
+        info = await client.info()
+        if not info.tables:
+            pytest.skip("No tables available")
+
+        # info.tables may already be qualified (database.table) or bare.
+        reported = info.tables[0]
+        bare = reported.split(".", 1)[1] if "." in reported else reported
+
+        via_reported = await client.search(reported, "test", SearchOptions(limit=5))
+        via_bare = await client.search(bare, "test", SearchOptions(limit=5))
+
+        assert via_reported.total_count == via_bare.total_count
+
+    async def test_search_raw_boolean_or(self, client):
+        info = await client.info()
+        if not info.tables:
+            pytest.skip("No tables available")
+
+        table = info.tables[0]
+        result = await client.search_raw(
+            table, "hello OR world", SearchRawOptions(limit=5)
+        )
+
+        assert result is not None
+        assert isinstance(result.total_count, int)
+        assert isinstance(result.results, list)
+
+    async def test_search_raw_grouped_expression(self, client):
+        info = await client.info()
+        if not info.tables:
+            pytest.skip("No tables available")
+
+        table = info.tables[0]
+        raw = convert_search_expression("hello OR (world AND test)")
+        result = await client.search_raw(table, raw, SearchRawOptions(limit=5))
+
+        assert isinstance(result.total_count, int)
+
+    async def test_runtime_variables_round_trip(self, client):
+        # Some builds mark all variables immutable; tolerate a server rejection
+        # as long as the protocol round-trips cleanly.
+        try:
+            await client.set_variable("logging.level", "info")
+        except _OPTIONAL_FEATURE_ERRORS:
+            pass
+        variables = await client.show_variables("logging%")
+        assert isinstance(variables, str)
+        assert len(variables) > 0
+
+    async def test_sync_status_round_trip(self, client):
+        status = await client.sync_status()
+        assert isinstance(status, str)
+        assert "SYNC_STATUS" in status
+
+    async def test_sync_stop_with_no_active_sync(self, client):
+        # With nothing running the server may answer OK or ERROR; both prove the
+        # command framed correctly.
+        try:
+            result = await client.sync_stop()
+            assert isinstance(result, str)
+        except _OPTIONAL_FEATURE_ERRORS:
+            pass
+
+
+@pytest.mark.skipif(not SEEDED, reason="requires MYGRAM_E2E_SEEDED=1 (docker e2e)")
+class TestSeededDataset:
+    """
+    Deterministic assertions against the fixed dataset seeded by
+    tests/docker/run-e2e.sh. See tests/docker/mysql-init/02-seed.sql.
+    """
+
+    TABLE = "testdb.articles"  # database-qualified identity (v1.7)
+
+    @staticmethod
+    def _ids(response) -> list:
+        return sorted(r.primary_key for r in response.results)
+
+    async def test_search_resolves_qualified_identity(self, client):
+        res = await client.search(self.TABLE, "python")
+        assert res.total_count == 1
+        assert self._ids(res) == ["3"]
+
+    async def test_multi_word_phrase_excludes_disabled_rows(self, client):
+        # id 6 also contains "machine learning" but is enabled=0 (hidden).
+        res = await client.search(self.TABLE, "machine learning")
+        assert res.total_count == 1
+        assert self._ids(res) == ["3"]
+
+    async def test_matches_japanese_content(self, client):
+        res = await client.search(self.TABLE, "機械学習")
+        assert res.total_count == 2
+        assert self._ids(res) == ["1", "5"]
+
+    async def test_count_matches_single_row(self, client):
+        res = await client.count(self.TABLE, "golang")
+        assert res.count == 1
+
+    async def test_search_raw_boolean_or(self, client):
+        res = await client.search_raw(self.TABLE, "ruby OR python")
+        assert res.total_count == 2
+        assert self._ids(res) == ["2", "3"]
+
+    async def test_bare_and_qualified_resolve_identically(self, client):
+        qualified = await client.search("testdb.articles", "python")
+        bare = await client.search("articles", "python")
+        assert bare.total_count == qualified.total_count
+        assert bare.total_count == 1
+
+    async def test_facet_aggregates_enabled_rows_by_category(self, client):
+        resp = await client.facet(self.TABLE, "category")
+        by_value = {v.value: v.count for v in resp.results}
+        assert by_value.get("tech") == 3
+        assert by_value.get("science") == 2
+
+    async def test_get_returns_seeded_document(self, client):
+        doc = await client.get(self.TABLE, "1")
+        assert doc.primary_key == "1"
+        assert doc.fields.get("category") == "tech"
+
+    async def test_search_with_highlights_wraps_match(self, client):
+        res = await client.search_with_highlights(
+            self.TABLE, "python",
+            SearchOptions(highlight=HighlightOptions(open_tag="<em>", close_tag="</em>")),
+        )
+        assert res.total_count == 1
+        assert res.results[0].snippet is not None
+        assert "<em>python</em>" in res.results[0].snippet

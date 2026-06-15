@@ -434,6 +434,24 @@ class TestHighlightSearchResponse:
         assert result.debug is not None
         assert result.debug.query_time_ms == 1.5
 
+    def test_debug_block_tolerates_ms_unit_suffix(self):
+        # The server emits timings with a trailing unit (e.g. "0.011ms").
+        response = (
+            "OK RESULTS 1\n"
+            "id1\tmatched <em>x</em>\n"
+            "# DEBUG\n"
+            "query_time: 0.011ms\n"
+            "index_time: 1.250ms\n"
+            "filter_time: 0.5ms\n"
+            "terms: 2"
+        )
+        result = MygramClient._parse_search_response(response)
+
+        assert result.debug is not None
+        assert result.debug.query_time_ms == 0.011
+        assert result.debug.index_time_ms == 1.25
+        assert result.debug.filter_time_ms == 0.5
+
 
 class TestFacetResponseParsing:
     """Tests for parsing FACET responses."""

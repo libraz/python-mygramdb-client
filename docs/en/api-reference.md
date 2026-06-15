@@ -59,10 +59,14 @@ async def search(
 ) -> SearchResponse
 ```
 
-Search for documents in a table.
+Search for documents in a table. Multi-word queries are quoted automatically so
+they reach the server as a single phrase token; use
+[`search_raw()`](#search_raw) for boolean `AND`/`OR`/`NOT`/grouping expressions.
 
 **Parameters:**
-- `table` - Table name to search in
+- `table` - Table name to search in. In a MygramDB v1.7+ multi-database
+  deployment, pass a `database.table` identity (e.g. `app_db.articles`); a bare
+  name still works for single-database servers.
 - `query` - Search query text
 - `options` - Optional search options
 
@@ -73,6 +77,41 @@ Search for documents in a table.
 - `TimeoutError` - If operation times out
 - `ProtocolError` - If server returns an error
 - `InputValidationError` - If input validation fails
+
+`search_with_highlights(table, query, options=None)` is the same call with the
+`HIGHLIGHT` clause enabled, returning snippets in `result.snippet`.
+
+#### search_raw()
+
+```python
+async def search_raw(
+    table: str,
+    raw_query: str,
+    options: Optional[SearchRawOptions] = None
+) -> SearchResponse
+```
+
+Search using a pre-built boolean expression (MygramDB v1.7+). The expression is
+sent as one quoted token so the server's AST parser can interpret
+`AND` / `OR` / `NOT` / parentheses. Pair with
+[`convert_search_expression()`](#convert_search_expression) to preserve OR /
+grouping semantics that `search()`'s AND/NOT decomposition cannot express.
+
+**Parameters:**
+- `table` - Table name (bare or `database.table`)
+- `raw_query` - Pre-built boolean expression (must not be empty)
+- `options` - Optional `SearchRawOptions` (`limit`, `offset`, `highlight`)
+
+**Returns:** `SearchResponse` containing results and total count.
+
+**Example:**
+```python
+raw = convert_search_expression('python OR (ruby AND rails)')
+results = await client.search_raw('articles', raw, SearchRawOptions(limit=50))
+```
+
+`search_raw_with_highlights(table, raw_query, options=None)` is the same call
+with a `HIGHLIGHT` clause enabled, returning snippets in `result.snippet`.
 
 #### count()
 
@@ -182,6 +221,51 @@ Send raw command to server.
 
 **Returns:** Response string from server.
 
+#### set_variable() (v1.7+)
+
+```python
+async def set_variable(name: str, value: str) -> None
+```
+
+Set a runtime variable (MySQL-compatible `SET`). Values containing whitespace
+are quoted automatically. Raises `ProtocolError` if the server rejects it.
+
+#### show_variables() (v1.7+)
+
+```python
+async def show_variables(like_pattern: Optional[str] = None) -> str
+```
+
+Return the runtime variables table (`SHOW VARIABLES [LIKE <pattern>]`) as the
+raw server response string.
+
+#### sync() (v1.7+)
+
+```python
+async def sync(table: str) -> str
+```
+
+Start an on-demand full reload of a table (`SYNC <table>`). Accepts a bare or
+`database.table` identity. Returns the server acknowledgement.
+
+#### sync_status() (v1.7+)
+
+```python
+async def sync_status() -> str
+```
+
+Return the `SYNC STATUS` report (in-flight and recent sync operations) as the
+raw server response string.
+
+#### sync_stop() (v1.7+)
+
+```python
+async def sync_stop(table: Optional[str] = None) -> str
+```
+
+Stop a running sync. With no table, stops every in-flight sync; with a table,
+stops only that table's sync.
+
 ---
 
 ## Types
@@ -210,6 +294,16 @@ class SearchOptions:
     filters: Dict[str, str] = field(default_factory=dict)
     sort_column: Optional[str] = None
     sort_desc: bool = True
+```
+
+### SearchRawOptions (v1.7+)
+
+```python
+@dataclass
+class SearchRawOptions:
+    limit: int = 0                              # Max results (0 = server default)
+    offset: int = 0                             # Pagination offset
+    highlight: Optional[HighlightOptions] = None  # Pass HighlightOptions() for defaults
 ```
 
 ### CountOptions
@@ -402,6 +496,38 @@ def to_query_string(expr: SearchExpression) -> str
 ```
 
 Convert search expression to query string.
+
+---
+
+## Table Identity Helpers (v1.7+)
+
+### qualify_table_identity()
+
+```python
+def qualify_table_identity(table: str, database: Optional[str] = None) -> str
+```
+
+Build a `database.table` identity (or return the bare table when no database is
+given). Both parts are validated and must not contain whitespace, control
+characters, or an embedded `.` separator.
+
+```python
+qualify_table_identity('articles', 'app_db')  # 'app_db.articles'
+```
+
+### parse_table_identity()
+
+```python
+def parse_table_identity(identity: str) -> tuple[Optional[str], str]
+```
+
+Split a (possibly qualified) identity into `(database, table)`; `database` is
+`None` for bare names.
+
+```python
+parse_table_identity('app_db.articles')  # ('app_db', 'articles')
+parse_table_identity('articles')         # (None, 'articles')
+```
 
 ---
 

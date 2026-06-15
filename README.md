@@ -118,6 +118,48 @@ for v in facets.results:
     print(f'{v.value}: {v.count}')
 ```
 
+## MygramDB v1.7 Features
+
+### Multi-database (qualified table identity)
+
+A v1.7+ instance can index tables from more than one database. Reference a
+table as `database.table`; bare names still work on single-database servers.
+
+```python
+from mygramdb_client import qualify_table_identity, parse_table_identity
+
+await client.search('app_db.articles', 'hello')
+
+qualify_table_identity('articles', 'app_db')  # 'app_db.articles'
+parse_table_identity('app_db.articles')       # ('app_db', 'articles')
+```
+
+### Boolean search
+
+`search()` sends the query as a single (auto-quoted) token. For boolean
+`AND`/`OR`/`NOT`/grouping, build the expression and pass it to `search_raw()`:
+
+```python
+from mygramdb_client import convert_search_expression, SearchRawOptions
+
+raw = convert_search_expression('python OR (ruby AND rails)')
+res = await client.search_raw('articles', raw, SearchRawOptions(limit=50))
+
+# searchWithHighlights / searchRawWithHighlights enable the HIGHLIGHT clause:
+res = await client.search_with_highlights('articles', 'python')
+```
+
+### Runtime variables and on-demand sync
+
+```python
+await client.set_variable('logging.level', 'info')
+print(await client.show_variables('logging%'))
+
+await client.sync('app_db.articles')
+print(await client.sync_status())
+await client.sync_stop('app_db.articles')
+```
+
 ## Type Hints
 
 Full type definitions are included:

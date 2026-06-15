@@ -59,10 +59,14 @@ async def search(
 ) -> SearchResponse
 ```
 
-テーブル内のドキュメントを検索します。
+テーブル内のドキュメントを検索します。複数語のクエリは自動的に引用符で囲まれ、
+単一のフレーズトークンとしてサーバーに送信されます。`AND`/`OR`/`NOT`/グループ化を
+含むブール式には [`search_raw()`](#search_raw) を使用してください。
 
 **パラメータ:**
-- `table` - 検索対象のテーブル名
+- `table` - 検索対象のテーブル名。MygramDB v1.7+ のマルチデータベース構成では
+  `database.table` 形式の識別子（例: `app_db.articles`）を渡します。単一
+  データベースのサーバーでは従来どおりテーブル名のみでも動作します。
 - `query` - 検索クエリ文字列
 - `options` - オプションの検索オプション
 
@@ -73,6 +77,41 @@ async def search(
 - `TimeoutError` - 操作がタイムアウトした場合
 - `ProtocolError` - サーバーがエラーを返した場合
 - `InputValidationError` - 入力バリデーションに失敗した場合
+
+`search_with_highlights(table, query, options=None)` は同じ呼び出しに `HIGHLIGHT`
+句を有効化したもので、スニペットを `result.snippet` で返します。
+
+#### search_raw()
+
+```python
+async def search_raw(
+    table: str,
+    raw_query: str,
+    options: Optional[SearchRawOptions] = None
+) -> SearchResponse
+```
+
+事前に構築したブール式で検索します（MygramDB v1.7+）。式は単一の引用符付き
+トークンとして送信されるため、サーバーの AST パーサが `AND` / `OR` / `NOT` /
+括弧を解釈できます。`search()` の AND/NOT 分解では表現できない OR / グループ化
+セマンティクスを保持するには、[`convert_search_expression()`](#convert_search_expression)
+と組み合わせて使用します。
+
+**パラメータ:**
+- `table` - テーブル名（`database.table` 形式も可）
+- `raw_query` - 事前構築したブール式（空文字列は不可）
+- `options` - オプションの `SearchRawOptions`（`limit`、`offset`、`highlight`）
+
+**戻り値:** 結果と総数を含む `SearchResponse`。
+
+**例:**
+```python
+raw = convert_search_expression('python OR (ruby AND rails)')
+results = await client.search_raw('articles', raw, SearchRawOptions(limit=50))
+```
+
+`search_raw_with_highlights(table, raw_query, options=None)` は同じ呼び出しに
+`HIGHLIGHT` 句を有効化したものです。
 
 #### count()
 
@@ -182,6 +221,51 @@ async def send_command(command: str) -> str
 
 **戻り値:** サーバーからのレスポンス文字列。
 
+#### set_variable() (v1.7+)
+
+```python
+async def set_variable(name: str, value: str) -> None
+```
+
+ランタイム変数を設定します（MySQL 互換の `SET`）。空白を含む値は自動的に引用符で
+囲まれます。サーバーが拒否した場合は `ProtocolError` を送出します。
+
+#### show_variables() (v1.7+)
+
+```python
+async def show_variables(like_pattern: Optional[str] = None) -> str
+```
+
+ランタイム変数の一覧（`SHOW VARIABLES [LIKE <pattern>]`）を生のレスポンス文字列
+として返します。
+
+#### sync() (v1.7+)
+
+```python
+async def sync(table: str) -> str
+```
+
+テーブルのオンデマンド完全リロード（`SYNC <table>`）を開始します。テーブル名は
+`database.table` 形式も可。サーバーの受理応答を返します。
+
+#### sync_status() (v1.7+)
+
+```python
+async def sync_status() -> str
+```
+
+`SYNC STATUS` レポート（実行中および直近の同期操作）を生のレスポンス文字列として
+返します。
+
+#### sync_stop() (v1.7+)
+
+```python
+async def sync_stop(table: Optional[str] = None) -> str
+```
+
+実行中の同期を停止します。テーブルを指定しない場合はすべての実行中の同期を、
+指定した場合はそのテーブルの同期のみを停止します。
+
 ---
 
 ## 型
@@ -210,6 +294,16 @@ class SearchOptions:
     filters: Dict[str, str] = field(default_factory=dict)
     sort_column: Optional[str] = None
     sort_desc: bool = True
+```
+
+### SearchRawOptions (v1.7+)
+
+```python
+@dataclass
+class SearchRawOptions:
+    limit: int = 0                              # 最大結果数（0 = サーバー既定）
+    offset: int = 0                             # ページネーションのオフセット
+    highlight: Optional[HighlightOptions] = None  # HighlightOptions() で既定値を有効化
 ```
 
 ### CountOptions
@@ -402,6 +496,38 @@ def to_query_string(expr: SearchExpression) -> str
 ```
 
 SearchExpression をクエリ文字列に変換します。
+
+---
+
+## テーブル識別子ヘルパー (v1.7+)
+
+### qualify_table_identity()
+
+```python
+def qualify_table_identity(table: str, database: Optional[str] = None) -> str
+```
+
+`database.table` 形式の識別子を構築します（データベースを指定しない場合は
+テーブル名のみを返します）。両方の部分はバリデーションされ、空白・制御文字・
+埋め込みの `.` 区切り文字を含むことはできません。
+
+```python
+qualify_table_identity('articles', 'app_db')  # 'app_db.articles'
+```
+
+### parse_table_identity()
+
+```python
+def parse_table_identity(identity: str) -> tuple[Optional[str], str]
+```
+
+（修飾されている可能性のある）識別子を `(database, table)` に分割します。
+テーブル名のみの場合 `database` は `None` になります。
+
+```python
+parse_table_identity('app_db.articles')  # ('app_db', 'articles')
+parse_table_identity('articles')         # (None, 'articles')
+```
 
 ---
 

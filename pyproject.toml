@@ -1,6 +1,6 @@
 [project]
 name = "mygramdb-client"
-version = "1.1.1"
+version = "1.2.0"
 description = "Python client for MygramDB - high-performance in-memory full-text search engine with MySQL replication support"
 authors = [
     { name = "libraz", email = "libraz@libraz.net" }
@@ -39,6 +39,7 @@ build-backend = "hatchling.build"
 managed = true
 dev-dependencies = [
     "flake8>=7.0.0",
+    "mypy>=1.8.0",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=6.0.0",
@@ -57,3 +58,10 @@ exclude = [".git", "__pycache__", "build", "dist", ".venv"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.mypy]
+# 3.10 is the oldest target mypy accepts; the package itself still supports 3.9.
+python_version = "3.10"
+files = ["src/mygramdb_client"]
+ignore_missing_imports = true
+warn_unused_ignores = true

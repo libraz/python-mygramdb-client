@@ -4,6 +4,8 @@ MygramDB Client Implementation.
 This module provides an async client for connecting to and querying MygramDB servers.
 """
 import asyncio
+import re
+from dataclasses import replace
 from typing import Dict, List, Optional
 
 from .command_utils import (
@@ -12,12 +14,19 @@ from .command_utils import (
     ensure_safe_filters,
     ensure_safe_string_array,
     escape_query_string,
+    quote_command_argument,
     validate_facet_column,
     validate_fuzzy,
     validate_highlight,
     validate_identifier,
 )
-from .errors import ConnectionError, ProtocolError, ServerError, TimeoutError
+from .errors import (
+    ConnectionError,
+    InputValidationError,
+    ProtocolError,
+    ServerError,
+    TimeoutError,
+)
 from .types import (
     CacheStats,
     ClientConfig,
@@ -29,8 +38,10 @@ from .types import (
     FacetOptions,
     FacetResponse,
     FacetValue,
+    HighlightOptions,
     ReplicationStatus,
     SearchOptions,
+    SearchRawOptions,
     SearchResponse,
     SearchResult,
     ServerInfo,
@@ -125,6 +136,45 @@ class MygramClient:
         """Check if connected to server."""
         return self._connected
 
+    @staticmethod
+    def _append_highlight_clause(
+        parts: List[str], highlight: Optional[HighlightOptions]
+    ) -> None:
+        """
+        Append the HIGHLIGHT clause (and its TAG / SNIPPET_LEN / MAX_FRAGMENTS
+        sub-options) to a command's token list when highlight options are
+        present (no-op when ``None``). MygramDB v1.6+.
+        """
+        if highlight is None:
+            return
+        parts.append("HIGHLIGHT")
+        open_tag = highlight.open_tag or ""
+        close_tag = highlight.close_tag or ""
+        if open_tag != "" and close_tag != "":
+            parts.extend(["TAG", open_tag, close_tag])
+        if highlight.snippet_len and highlight.snippet_len > 0:
+            parts.extend(["SNIPPET_LEN", str(highlight.snippet_len)])
+        if highlight.max_fragments and highlight.max_fragments > 0:
+            parts.extend(["MAX_FRAGMENTS", str(highlight.max_fragments)])
+
+    @staticmethod
+    def _append_limit_offset(parts: List[str], limit: int, offset: int) -> None:
+        """
+        Append the LIMIT / OFFSET clause to a command's token list.
+
+        - ``limit > 0`` and ``offset > 0`` emits the atomic ``LIMIT <offset>,<limit>``.
+        - ``limit > 0`` and ``offset == 0`` emits ``LIMIT <limit>``.
+        - ``limit == 0`` and ``offset > 0`` emits a bare ``OFFSET <offset>`` so
+          the server still skips the first ``<offset>`` results instead of
+          silently dropping it.
+        """
+        if limit > 0 and offset > 0:
+            parts.extend(["LIMIT", f"{offset},{limit}"])
+        elif limit > 0:
+            parts.extend(["LIMIT", str(limit)])
+        elif offset > 0:
+            parts.extend(["OFFSET", str(offset)])
+
     async def search(
         self,
         table: str,
@@ -195,29 +245,110 @@ class MygramClient:
             parts.extend(["FUZZY", str(opts.fuzzy)])
 
         # Add highlight (MygramDB v1.6+)
-        if opts.highlight is not None:
-            parts.append("HIGHLIGHT")
-            open_tag = opts.highlight.open_tag or ""
-            close_tag = opts.highlight.close_tag or ""
-            if open_tag != "" and close_tag != "":
-                parts.extend(["TAG", open_tag, close_tag])
-            if opts.highlight.snippet_len and opts.highlight.snippet_len > 0:
-                parts.extend(["SNIPPET_LEN", str(opts.highlight.snippet_len)])
-            if opts.highlight.max_fragments and opts.highlight.max_fragments > 0:
-                parts.extend(["MAX_FRAGMENTS", str(opts.highlight.max_fragments)])
+        self._append_highlight_clause(parts, opts.highlight)
 
         # Add limit and offset
-        if opts.offset > 0 and opts.limit > 0:
-            parts.extend(["LIMIT", f"{opts.offset},{opts.limit}"])
-        elif opts.offset > 0:
-            # offset > 0 with limit == 0: emit bare OFFSET so the server
-            # actually skips records instead of returning the first page
-            parts.extend(["OFFSET", str(opts.offset)])
-        elif opts.limit > 0:
-            parts.extend(["LIMIT", str(opts.limit)])
+        self._append_limit_offset(parts, opts.limit, opts.offset)
 
         response = await self.send_command(" ".join(parts))
         return self._parse_search_response(response)
+
+    async def search_with_highlights(
+        self,
+        table: str,
+        query: str,
+        options: Optional[SearchOptions] = None,
+    ) -> SearchResponse:
+        """
+        :meth:`search` variant that requests highlighted snippets.
+
+        Convenience wrapper that enables the HIGHLIGHT clause: any highlight
+        options passed in ``options`` are preserved, otherwise server defaults
+        are used. Snippets are returned in :attr:`SearchResult.snippet`.
+
+        Args:
+            table: Table name (bare or ``database.table``).
+            query: Search query text.
+            options: Search options.
+
+        Returns:
+            Search response with snippets.
+        """
+        opts = options or SearchOptions()
+        highlight = opts.highlight if opts.highlight is not None else HighlightOptions()
+        return await self.search(table, query, replace(opts, highlight=highlight))
+
+    async def search_raw(
+        self,
+        table: str,
+        raw_query: str,
+        options: Optional[SearchRawOptions] = None,
+    ) -> SearchResponse:
+        """
+        Search using a pre-built boolean expression (MygramDB v1.7+).
+
+        The expression is sent as one quoted token so the server's AST parser
+        can interpret ``AND`` / ``OR`` / ``NOT`` / parentheses. Pair this with
+        :func:`convert_search_expression` to preserve OR / grouping semantics
+        that :meth:`search`'s AND/NOT decomposition cannot express.
+
+        Args:
+            table: Table name (bare or ``database.table``).
+            raw_query: Pre-built boolean expression.
+            options: Limit/offset/highlight options.
+
+        Returns:
+            Search response.
+
+        Raises:
+            InputValidationError: If the table or expression is invalid.
+            ConnectionError: If not connected to server.
+            ProtocolError: On server error or invalid response.
+
+        Example:
+            >>> raw = convert_search_expression("python OR (ruby AND rails)")
+            >>> res = await client.search_raw("articles", raw,
+            ...                                SearchRawOptions(limit=50))
+        """
+        opts = options or SearchRawOptions()
+
+        validate_identifier(table, "table name")
+        if raw_query == "":
+            raise InputValidationError("Input for raw_query must not be empty")
+        ensure_safe_command_value(raw_query, "raw_query")
+        validate_highlight(opts.highlight)
+
+        parts: List[str] = ["SEARCH", table, escape_query_string(raw_query)]
+        self._append_highlight_clause(parts, opts.highlight)
+        self._append_limit_offset(parts, opts.limit, opts.offset)
+
+        response = await self.send_command(" ".join(parts))
+        return self._parse_search_response(response)
+
+    async def search_raw_with_highlights(
+        self,
+        table: str,
+        raw_query: str,
+        options: Optional[SearchRawOptions] = None,
+    ) -> SearchResponse:
+        """
+        :meth:`search_raw` variant that requests highlighted snippets.
+
+        Equivalent to calling :meth:`search_raw` with a ``highlight`` option;
+        any highlight options passed in ``options`` are preserved, otherwise
+        server defaults are used.
+
+        Args:
+            table: Table name (bare or ``database.table``).
+            raw_query: Pre-built boolean expression.
+            options: Limit/offset/highlight options.
+
+        Returns:
+            Search response with snippets.
+        """
+        opts = options or SearchRawOptions()
+        highlight = opts.highlight if opts.highlight is not None else HighlightOptions()
+        return await self.search_raw(table, raw_query, replace(opts, highlight=highlight))
 
     async def count(
         self,
@@ -411,8 +542,10 @@ class MygramClient:
         Returns:
             File path where the dump is being saved.
         """
-        ensure_safe_command_value(filepath, "filepath")
-        cmd = f"DUMP SAVE {filepath}" if filepath else "DUMP SAVE"
+        if filepath:
+            cmd = f"DUMP SAVE {quote_command_argument(filepath, 'filepath')}"
+        else:
+            cmd = "DUMP SAVE"
         response = await self.send_command(cmd)
         if response.startswith("OK DUMP_STARTED "):
             return response[16:]
@@ -427,8 +560,10 @@ class MygramClient:
         Args:
             filepath: File path on the server to load the dump from.
         """
-        ensure_safe_command_value(filepath, "filepath")
-        cmd = f"DUMP LOAD {filepath}" if filepath else "DUMP LOAD"
+        if filepath:
+            cmd = f"DUMP LOAD {quote_command_argument(filepath, 'filepath')}"
+        else:
+            cmd = "DUMP LOAD"
         response = await self.send_command(cmd)
         if not response.startswith("OK"):
             raise ProtocolError(f"Failed to load dump: {response}")
@@ -448,8 +583,9 @@ class MygramClient:
         Returns:
             Verification result message.
         """
-        ensure_safe_command_value(filepath, "filepath")
-        response = await self.send_command(f"DUMP VERIFY {filepath}")
+        response = await self.send_command(
+            f"DUMP VERIFY {quote_command_argument(filepath, 'filepath')}"
+        )
         if not response.startswith("OK"):
             raise ProtocolError(f"Failed to verify dump: {response}")
         return response
@@ -464,8 +600,9 @@ class MygramClient:
         Returns:
             Dump metadata string.
         """
-        ensure_safe_command_value(filepath, "filepath")
-        response = await self.send_command(f"DUMP INFO {filepath}")
+        response = await self.send_command(
+            f"DUMP INFO {quote_command_argument(filepath, 'filepath')}"
+        )
         if not response.startswith("OK"):
             raise ProtocolError(f"Failed to get dump info: {response}")
         return response
@@ -582,6 +719,102 @@ class MygramClient:
         response = await self.send_command(" ".join(parts))
         return self._parse_facet_response(response)
 
+    async def set_variable(self, name: str, value: str) -> None:
+        """
+        Set a runtime variable (MygramDB v1.7+, MySQL-compatible ``SET``).
+
+        The variable name is sent unquoted (validated as an identifier); the
+        value is quoted when it contains whitespace or quote characters.
+
+        Args:
+            name: Runtime variable name (e.g. ``logging.level``).
+            value: New value.
+
+        Raises:
+            ProtocolError: When the server rejects the assignment.
+        """
+        validate_identifier(name, "variable name")
+        safe_value = quote_command_argument(value, "value")
+        response = await self.send_command(f"SET {name} = {safe_value}")
+        if not response.startswith("OK") and not response.startswith("+OK"):
+            raise ProtocolError(f"Failed to set variable: {response}")
+
+    async def show_variables(self, like_pattern: Optional[str] = None) -> str:
+        """
+        Show runtime variables (MygramDB v1.7+, MySQL-compatible
+        ``SHOW VARIABLES``).
+
+        Args:
+            like_pattern: Optional MySQL LIKE pattern (e.g. ``logging%``).
+
+        Returns:
+            Raw variables table / ``+OK`` response from the server.
+        """
+        if not like_pattern:
+            return await self.send_command("SHOW VARIABLES")
+        safe_pattern = quote_command_argument(like_pattern, "like_pattern")
+        return await self.send_command(f"SHOW VARIABLES LIKE {safe_pattern}")
+
+    async def sync(self, table: str) -> str:
+        """
+        Start an on-demand sync (full reload) of a table (MygramDB v1.7+).
+
+        Args:
+            table: Table name (bare or ``database.table``).
+
+        Returns:
+            Server acknowledgement (e.g. ``OK SYNC STARTED ...``).
+
+        Raises:
+            ProtocolError: When the server rejects the request.
+        """
+        validate_identifier(table, "table name")
+        response = await self.send_command(f"SYNC {table}")
+        if not response.startswith("OK"):
+            raise ProtocolError(f"Failed to start sync: {response}")
+        return response
+
+    async def sync_status(self) -> str:
+        """
+        Get the status of in-flight / recent sync operations (MygramDB v1.7+).
+
+        Returns:
+            Raw ``SYNC_STATUS`` report from the server.
+
+        Raises:
+            ProtocolError: When the response is not a SYNC status response.
+        """
+        response = await self.send_command("SYNC STATUS")
+        if not response.startswith("OK"):
+            raise ProtocolError(f"Failed to get sync status: {response}")
+        return response
+
+    async def sync_stop(self, table: Optional[str] = None) -> str:
+        """
+        Stop a running sync (MygramDB v1.7+).
+
+        With no table, stops every in-flight sync; with a table, stops only
+        that table's sync.
+
+        Args:
+            table: Optional table name (bare or ``database.table``).
+
+        Returns:
+            Server acknowledgement.
+
+        Raises:
+            ProtocolError: When the server rejects the request.
+        """
+        if table:
+            validate_identifier(table, "table name")
+            cmd = f"SYNC STOP {table}"
+        else:
+            cmd = "SYNC STOP"
+        response = await self.send_command(cmd)
+        if not response.startswith("OK"):
+            raise ProtocolError(f"Failed to stop sync: {response}")
+        return response
+
     async def send_command(self, command: str) -> str:
         """
         Send raw command to server.
@@ -629,6 +862,8 @@ class MygramClient:
 
     async def _read_response(self) -> str:
         """Read complete response from server."""
+        # Only reached from send_command, which guarantees a live connection.
+        assert self._reader is not None
         buffer = ""
 
         while True:
@@ -658,6 +893,7 @@ class MygramClient:
         ("OK REPLICATION", True),
         ("OK CACHE_STATS", True),
         ("OK DUMP_STATUS", True),
+        ("OK SYNC_STATUS", True),
         ("OK DUMP_INFO", False),
     )
 
@@ -1008,6 +1244,19 @@ class MygramClient:
         return ReplicationStatus(running=running, gtid=gtid, status_str=response)
 
     @staticmethod
+    @staticmethod
+    def _parse_leading_float(value: str) -> float:
+        """
+        Parse the leading numeric portion of a value, tolerating a trailing
+        unit suffix (e.g. the server emits debug timings as ``0.011ms``).
+
+        Mirrors the lenient behaviour of JavaScript's ``parseFloat``; returns
+        ``0.0`` when no numeric prefix is present.
+        """
+        match = re.match(r"\s*([+-]?\d+(?:\.\d+)?)", value)
+        return float(match.group(1)) if match else 0.0
+
+    @staticmethod
     def _parse_debug_info(lines: List[str]) -> DebugInfo:
         """Parse debug info from response lines."""
         debug = DebugInfo()
@@ -1025,11 +1274,11 @@ class MygramClient:
             value = value.strip()
 
             if key == "query_time":
-                debug.query_time_ms = float(value)
+                debug.query_time_ms = MygramClient._parse_leading_float(value)
             elif key == "index_time":
-                debug.index_time_ms = float(value)
+                debug.index_time_ms = MygramClient._parse_leading_float(value)
             elif key == "filter_time":
-                debug.filter_time_ms = float(value)
+                debug.filter_time_ms = MygramClient._parse_leading_float(value)
             elif key == "terms":
                 debug.terms = int(value)
             elif key == "ngrams":
@@ -1051,9 +1300,9 @@ class MygramClient:
             elif key == "cache":
                 debug.cache = value
             elif key == "cache_age_ms":
-                debug.cache_age_ms = float(value)
+                debug.cache_age_ms = MygramClient._parse_leading_float(value)
             elif key == "cache_saved_ms":
-                debug.cache_saved_ms = float(value)
+                debug.cache_saved_ms = MygramClient._parse_leading_float(value)
             elif key == "limit":
                 debug.limit = int(value.replace("(default)", "").strip())
             elif key == "offset":

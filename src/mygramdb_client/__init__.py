@@ -18,6 +18,7 @@ Example usage:
         await client.disconnect()
 """
 from .client import MygramClient, create_mygram_client
+from .command_utils import parse_table_identity, qualify_table_identity
 from .errors import (
     ConnectionError,
     InputValidationError,
@@ -48,13 +49,14 @@ from .types import (
     HighlightOptions,
     ReplicationStatus,
     SearchOptions,
+    SearchRawOptions,
     SearchResponse,
     SearchResult,
     ServerInfo,
     SimplifiedExpression,
 )
 
-__version__ = "1.1.1"
+__version__ = "1.2.0"
 
 __all__ = [
     # Client
@@ -63,6 +65,7 @@ __all__ = [
     # Config and Options
     "ClientConfig",
     "SearchOptions",
+    "SearchRawOptions",
     "CountOptions",
     "HighlightOptions",
     "FacetOptions",
@@ -86,6 +89,9 @@ __all__ = [
     "convert_search_expression",
     "has_complex_expression",
     "to_query_string",
+    # Table identity helpers (v1.7+)
+    "qualify_table_identity",
+    "parse_table_identity",
     # Errors
     "MygramError",
     "ConnectionError",

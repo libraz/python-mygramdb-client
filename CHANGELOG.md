@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-06-15
+
+### Added
+
+- MygramDB v1.7 support
+  - Database-qualified table identity (``database.table``) accepted by every
+    table argument; new ``qualify_table_identity`` / ``parse_table_identity``
+    helpers exported from the package
+  - ``MygramClient.search_raw`` / ``search_raw_with_highlights`` for sending a
+    pre-built boolean expression as a single quoted token (preserves
+    ``OR`` / grouping semantics), with the new ``SearchRawOptions`` type
+  - ``MygramClient.search_with_highlights`` convenience wrapper that enables
+    the HIGHLIGHT clause with server defaults
+  - ``MygramClient.set_variable`` / ``show_variables`` (MySQL-compatible
+    ``SET`` / ``SHOW VARIABLES [LIKE ...]``)
+  - ``MygramClient.sync`` / ``sync_status`` / ``sync_stop`` for on-demand
+    table reloads
+- ``quote_command_argument`` helper in ``command_utils`` mirroring the C++
+  client's ``QuoteCommandArgumentIfNeeded``
+- Self-contained docker-compose e2e harness under ``tests/docker/`` with a
+  ``run-e2e.sh`` orchestrator and a deterministic seeded dataset
+- Unit tests for the v1.7 surface and seeded/round-trip e2e tests
+
+### Changed
+
+- DUMP filepaths (``dump_save`` / ``dump_load`` / ``dump_verify`` /
+  ``dump_info``) are now quoted via ``quote_command_argument`` when they
+  contain whitespace instead of being sent as split tokens
+- ``_is_response_complete`` recognises ``OK SYNC_STATUS`` as an
+  ``END``-terminated multi-line response (including the server's trailing
+  blank line after ``END``)
+
+### Fixed
+
+- ``_parse_debug_info`` now tolerates the unit suffix the server appends to
+  debug timings (e.g. ``query_time: 0.011ms``). Previously ``float()`` raised
+  ``ValueError``, which surfaced as a crash on SEARCH debug parsing and a
+  silently dropped ``debug`` on COUNT
+
 ## [1.1.1] - 2026-05-09
 
 ### Added
@@ -90,7 +129,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Input validation and error handling
 - Full type hints with dataclasses
 
-[Unreleased]: https://github.com/libraz/python-mygramdb-client/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/libraz/python-mygramdb-client/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/libraz/python-mygramdb-client/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/libraz/python-mygramdb-client/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/libraz/python-mygramdb-client/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/libraz/python-mygramdb-client/releases/tag/v1.0.0

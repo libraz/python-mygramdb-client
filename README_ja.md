@@ -8,7 +8,7 @@
 
 [MygramDB](https://github.com/libraz/mygram-db/) 用の Python クライアントライブラリ — MySQL レプリケーションをサポートする高性能インメモリ全文検索エンジン。
 
-> **MygramDB v1.6** 対応（ファジー検索、ハイライト、ファセット、BM25）。
+> **MygramDB v1.7** 対応（マルチデータベース、ブール検索 `search_raw`、ランタイム変数、オンデマンド同期）。v1.6 機能（ファジー検索、ハイライト、ファセット、BM25）も継続サポート。
 
 ## 概要
 
@@ -87,6 +87,50 @@ results = await client.search('articles', expr.main_term, SearchOptions(
     sort_column='created_at',
     sort_desc=True,
 ))
+```
+
+## MygramDB v1.7 機能
+
+### マルチデータベース（修飾テーブル識別子）
+
+v1.7+ のインスタンスは複数のデータベースのテーブルをインデックス化できます。
+テーブルは `database.table` の形式で参照します。単一データベースのサーバーでは
+従来どおりテーブル名のみでも動作します。
+
+```python
+from mygramdb_client import qualify_table_identity, parse_table_identity
+
+await client.search('app_db.articles', 'hello')
+
+qualify_table_identity('articles', 'app_db')  # 'app_db.articles'
+parse_table_identity('app_db.articles')       # ('app_db', 'articles')
+```
+
+### ブール検索
+
+`search()` はクエリを単一の（自動的に引用符で囲まれた）トークンとして送信します。
+`AND`/`OR`/`NOT`/グループ化を含むブール式は、式を組み立てて `search_raw()` に
+渡します：
+
+```python
+from mygramdb_client import convert_search_expression, SearchRawOptions
+
+raw = convert_search_expression('python OR (ruby AND rails)')
+res = await client.search_raw('articles', raw, SearchRawOptions(limit=50))
+
+# search_with_highlights / search_raw_with_highlights は HIGHLIGHT 句を有効化します
+res = await client.search_with_highlights('articles', 'python')
+```
+
+### ランタイム変数とオンデマンド同期
+
+```python
+await client.set_variable('logging.level', 'info')
+print(await client.show_variables('logging%'))
+
+await client.sync('app_db.articles')
+print(await client.sync_status())
+await client.sync_stop('app_db.articles')
 ```
 
 ## 型ヒント

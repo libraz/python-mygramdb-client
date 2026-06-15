@@ -55,6 +55,53 @@ def validate_identifier(value: str, field_name: str) -> None:
             )
 
 
+def _quote_token_if_needed(value: str, quote_on_backslash: bool) -> str:
+    """
+    Wrap a value in double quotes when it would otherwise split into multiple
+    protocol tokens, escaping the characters that are special inside a quoted
+    token.
+
+    Mirrors the C++ client's ``EscapeQueryString`` / ``QuoteCommandArgumentIfNeeded``:
+    a value is quoted when it is empty or contains whitespace or a quote
+    character. Inside the quotes, ``"`` and ``\\`` are backslash-escaped and any
+    remaining control characters (code < 0x20) are dropped. Values that need no
+    quoting are returned verbatim so simple single-token queries stay
+    byte-identical on the wire.
+
+    ``quote_on_backslash`` selects which upstream helper is mirrored: query
+    strings follow ``EscapeQueryString`` (a lone backslash does NOT force
+    quoting), while command arguments follow ``QuoteCommandArgumentIfNeeded``
+    (a backslash does).
+
+    Args:
+        value: Value to quote (already control-char validated by the caller).
+        quote_on_backslash: Whether a lone ``\\`` forces quoting.
+
+    Returns:
+        Wire-safe single token.
+    """
+    if value == "":
+        return '""'
+
+    needs_quotes = any(
+        ch in _QUOTE_TRIGGER_CHARS or (quote_on_backslash and ch == "\\")
+        for ch in value
+    )
+    if not needs_quotes:
+        return value
+
+    out = ['"']
+    for ch in value:
+        if ord(ch) < 0x20:
+            # Drop control characters to prevent command injection.
+            continue
+        if ch == '"' or ch == "\\":
+            out.append("\\")
+        out.append(ch)
+    out.append('"')
+    return "".join(out)
+
+
 def escape_query_string(value: str) -> str:
     """
     Quote and escape a free-form value for use as a wire token.
@@ -65,27 +112,112 @@ def escape_query_string(value: str) -> str:
 
     Values containing whitespace, double quotes or single quotes are wrapped
     in double quotes with internal quotes/backslashes escaped. Control
-    characters are stripped to prevent command injection.
+    characters are stripped to prevent command injection. Matches the C++
+    client's ``EscapeQueryString`` (a lone backslash does not force quoting).
     """
-    if value == "":
-        return '""'
+    return _quote_token_if_needed(value, quote_on_backslash=False)
 
-    needs_quotes = any(ch in _QUOTE_TRIGGER_CHARS for ch in value)
-    if not needs_quotes:
-        return value
 
-    out = ['"']
-    for ch in value:
-        if ch == '"' or ch == "\\":
-            out.append("\\")
-            out.append(ch)
-        elif ord(ch) < 0x20:
-            # Drop control characters
-            continue
-        else:
-            out.append(ch)
-    out.append('"')
-    return "".join(out)
+def quote_command_argument(value: str, field_name: str) -> str:
+    """
+    Quote a free-form command argument (e.g. a ``SET`` value, a
+    ``SHOW VARIABLES LIKE`` pattern or a ``DUMP`` filepath) when it contains
+    whitespace or quote characters. Mirrors the C++ client's
+    ``QuoteCommandArgumentIfNeeded``.
+
+    Unlike :func:`escape_query_string`, a lone backslash forces quoting and the
+    value is validated for control characters (which would otherwise be
+    silently dropped). An empty value is allowed and surfaced as the explicit
+    empty token ``""``.
+
+    Args:
+        value: Argument value.
+        field_name: Field name for clearer error messages.
+
+    Returns:
+        Wire-safe single token.
+
+    Raises:
+        InputValidationError: When the value contains control characters.
+    """
+    if value != "":
+        ensure_safe_command_value(value, field_name)
+    return _quote_token_if_needed(value, quote_on_backslash=True)
+
+
+def qualify_table_identity(table: str, database: Optional[str] = None) -> str:
+    """
+    Build a database-qualified table identity (``database.table``) for MygramDB
+    v1.7+ multi-database deployments.
+
+    A single-database deployment continues to accept a bare table name, so an
+    empty/omitted ``database`` returns just the validated table name. When a
+    database is supplied, both parts are validated as identifiers and must not
+    themselves contain a ``.`` separator; they are then joined as
+    ``database.table``.
+
+    Args:
+        table: Bare table name.
+        database: Owning database (empty/omitted for single-db).
+
+    Returns:
+        ``database.table``, or ``table`` when no database is given.
+
+    Raises:
+        InputValidationError: When either part is empty, contains
+            whitespace/control characters, or embeds a ``.`` separator.
+
+    Example:
+        >>> qualify_table_identity("articles")
+        'articles'
+        >>> qualify_table_identity("articles", "app_db")
+        'app_db.articles'
+    """
+    validate_identifier(table, "table")
+    if database is None or database == "":
+        return table
+    validate_identifier(database, "database")
+    if "." in database:
+        raise InputValidationError(
+            "Input for database must not contain a '.' separator"
+        )
+    if "." in table:
+        raise InputValidationError(
+            "Input for table must not contain a '.' when a database is "
+            "supplied separately"
+        )
+    return f"{database}.{table}"
+
+
+def parse_table_identity(identity: str) -> "tuple[Optional[str], str]":
+    """
+    Split a (possibly database-qualified) table identity into its parts.
+
+    Bare names return ``(None, table)``; qualified names are split on the first
+    ``.`` so ``app_db.articles`` yields ``("app_db", "articles")``. The identity
+    is validated as a protocol identifier first.
+
+    Args:
+        identity: ``database.table`` or a bare ``table``.
+
+    Returns:
+        A ``(database, table)`` tuple; ``database`` is ``None`` for bare names.
+
+    Raises:
+        InputValidationError: When the identity is empty/unsafe or has an empty
+            database or table half.
+    """
+    validate_identifier(identity, "table")
+    dot = identity.find(".")
+    if dot == -1:
+        return (None, identity)
+    database = identity[:dot]
+    table = identity[dot + 1:]
+    if database == "" or table == "":
+        raise InputValidationError(
+            f'Invalid table identity "{identity}": expected <database>.<table>'
+        )
+    return (database, table)
 
 
 def ensure_safe_command_value(value: str, field_name: str) -> None:
