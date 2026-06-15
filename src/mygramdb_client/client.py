@@ -1244,7 +1244,6 @@ class MygramClient:
         return ReplicationStatus(running=running, gtid=gtid, status_str=response)
 
     @staticmethod
-    @staticmethod
     def _parse_leading_float(value: str) -> float:
         """
         Parse the leading numeric portion of a value, tolerating a trailing

@@ -1,6 +1,6 @@
 [project]
 name = "mygramdb-client"
-version = "1.2.0"
+version = "1.2.1"
 description = "Python client for MygramDB - high-performance in-memory full-text search engine with MySQL replication support"
 authors = [
     { name = "libraz", email = "libraz@libraz.net" }

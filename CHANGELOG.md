@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-06-15
+
+### Fixed
+
+- `_parse_leading_float` carried a duplicate `@staticmethod` decorator, which
+  is uncallable on Python 3.9 (`'staticmethod' object is not callable`) and
+  crashed debug-info parsing on SEARCH/COUNT with `DEBUG ON`. Python 3.10+ was
+  unaffected. Removed the stray decorator
+
 ## [1.2.0] - 2026-06-15
 
 ### Added
@@ -129,7 +138,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Input validation and error handling
 - Full type hints with dataclasses
 
-[Unreleased]: https://github.com/libraz/python-mygramdb-client/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/libraz/python-mygramdb-client/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/libraz/python-mygramdb-client/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/libraz/python-mygramdb-client/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/libraz/python-mygramdb-client/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/libraz/python-mygramdb-client/compare/v1.0.0...v1.1.0
