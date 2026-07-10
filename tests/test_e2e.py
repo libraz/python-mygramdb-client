@@ -15,6 +15,9 @@ from mygramdb_client import (
     FacetOptions,
     HighlightOptions,
     MygramClient,
+    MygramPool,
+    PoolConfig,
+    RetryPolicy,
     SearchOptions,
     SearchRawOptions,
     convert_search_expression,
@@ -644,6 +647,74 @@ class TestV17Features:
             pass
 
 
+class TestV18Features:
+    """
+    Version-agnostic round-trip tests for MygramDB v1.8 client alignment:
+    unquoted boolean transport (OR groups nested under AND) and the connection
+    pool driven against a live server.
+    """
+
+    async def test_search_raw_or_group_nested_under_and(self, client):
+        info = await client.info()
+        if not info.tables:
+            pytest.skip("No tables available")
+
+        table = info.tables[0]
+        # Exercises the unquoted-transport parse path; against an arbitrary
+        # server we only assert it frames and parses cleanly.
+        result = await client.search_raw(
+            table, "(hello OR world) AND test", SearchRawOptions(limit=5)
+        )
+        assert isinstance(result.total_count, int)
+        assert isinstance(result.results, list)
+
+    async def test_pool_delegation_round_trip(self):
+        pool = MygramPool(
+            ClientConfig(host=TEST_HOST, port=TEST_PORT),
+            PoolConfig(min_connections=1, max_connections=3),
+        )
+        await pool.open()
+        try:
+            info = await pool.info()
+            assert info.version != "" or isinstance(info.uptime_seconds, int)
+            if info.tables:
+                result = await pool.search(
+                    info.tables[0], "test", SearchOptions(limit=5)
+                )
+                assert isinstance(result.total_count, int)
+            stats = pool.stats()
+            assert stats.total_acquires >= 1
+            assert stats.total_connections >= 1
+        finally:
+            await pool.close()
+
+    async def test_pool_concurrent_requests(self):
+        pool = MygramPool(
+            ClientConfig(host=TEST_HOST, port=TEST_PORT),
+            PoolConfig(
+                min_connections=2,
+                max_connections=4,
+                retry_policy=RetryPolicy(max_attempts=2),
+            ),
+        )
+        await pool.open()
+        try:
+            info = await pool.info()
+            if not info.tables:
+                pytest.skip("No tables available")
+            table = info.tables[0]
+            results = await asyncio.gather(
+                *[pool.search(table, "test", SearchOptions(limit=3))
+                  for _ in range(12)]
+            )
+            assert len(results) == 12
+            assert all(isinstance(r.total_count, int) for r in results)
+            # Concurrency never exceeded the pool ceiling.
+            assert pool.stats().total_connections <= 4
+        finally:
+            await pool.close()
+
+
 @pytest.mark.skipif(not SEEDED, reason="requires MYGRAM_E2E_SEEDED=1 (docker e2e)")
 class TestSeededDataset:
     """
@@ -682,6 +753,14 @@ class TestSeededDataset:
         assert res.total_count == 2
         assert self._ids(res) == ["2", "3"]
 
+    async def test_search_raw_or_group_nested_under_and(self, client):
+        # (ruby OR python) AND machine -> only id 3 ("python machine learning")
+        # carries both an OR-branch term and "machine". This is the exact shape
+        # that failed to parse before unquoted transport (MygramDB v1.8).
+        res = await client.search_raw(self.TABLE, "(ruby OR python) AND machine")
+        assert res.total_count == 1
+        assert self._ids(res) == ["3"]
+
     async def test_bare_and_qualified_resolve_identically(self, client):
         qualified = await client.search("testdb.articles", "python")
         bare = await client.search("articles", "python")
@@ -707,3 +786,22 @@ class TestSeededDataset:
         assert res.total_count == 1
         assert res.results[0].snippet is not None
         assert "<em>python</em>" in res.results[0].snippet
+
+    async def test_pool_search_matches_direct_client(self):
+        pool = MygramPool(
+            ClientConfig(host=TEST_HOST, port=TEST_PORT),
+            PoolConfig(min_connections=2, max_connections=4),
+        )
+        await pool.open()
+        try:
+            res = await pool.search(self.TABLE, "python")
+            assert res.total_count == 1
+            assert self._ids(res) == ["3"]
+
+            # Concurrent identical queries all resolve to the same seeded row.
+            batch = await asyncio.gather(
+                *[pool.search(self.TABLE, "python") for _ in range(8)]
+            )
+            assert all(self._ids(r) == ["3"] for r in batch)
+        finally:
+            await pool.close()

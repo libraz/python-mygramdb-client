@@ -148,10 +148,10 @@ except ValueError as e:
 ```python
 @dataclass
 class SearchExpression:
-    required_terms: List[str]   # Terms with + prefix
-    excluded_terms: List[str]   # Terms with - prefix
-    optional_terms: List[str]   # Terms without prefix
-    raw_expression: str         # Original expression (for complex expressions)
+    required_terms: List[str] = field(default_factory=list)  # Terms with + prefix
+    excluded_terms: List[str] = field(default_factory=list)  # Terms with - prefix
+    optional_terms: List[str] = field(default_factory=list)  # Terms without prefix
+    raw_expression: str = ""                                 # Original expression (for complex expressions)
 ```
 
 ### SimplifiedExpression
@@ -159,9 +159,9 @@ class SearchExpression:
 ```python
 @dataclass
 class SimplifiedExpression:
-    main_term: str              # First positive term
-    and_terms: List[str]        # Additional AND terms
-    not_terms: List[str]        # Excluded terms
+    main_term: str                                    # First positive term
+    and_terms: List[str] = field(default_factory=list)  # Additional AND terms
+    not_terms: List[str] = field(default_factory=list)  # Excluded terms
 ```
 
 ### Functions

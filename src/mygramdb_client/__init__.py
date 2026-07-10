@@ -20,13 +20,18 @@ Example usage:
 from .client import MygramClient, create_mygram_client
 from .command_utils import parse_table_identity, qualify_table_identity
 from .errors import (
+    CircuitOpenError,
     ConnectionError,
     InputValidationError,
     MygramError,
+    PoolClosedError,
+    PoolExhaustedError,
+    PoolTimeoutError,
     ProtocolError,
     ServerError,
     TimeoutError,
 )
+from .pool import MygramPool, PooledConnection
 from .search_expression import (
     SearchExpression,
     convert_search_expression,
@@ -37,6 +42,7 @@ from .search_expression import (
 )
 from .types import (
     CacheStats,
+    CircuitBreakerConfig,
     ClientConfig,
     CountOptions,
     CountResponse,
@@ -49,6 +55,10 @@ from .types import (
     HighlightOptions,
     ReplicationStatus,
     SearchOptions,
+    PoolConfig,
+    PoolEvent,
+    PoolStats,
+    RetryPolicy,
     SearchRawOptions,
     SearchResponse,
     SearchResult,
@@ -56,12 +66,20 @@ from .types import (
     SimplifiedExpression,
 )
 
-__version__ = "1.2.1"
+__version__ = "1.3.0"
 
 __all__ = [
     # Client
     "MygramClient",
     "create_mygram_client",
+    # Connection pool
+    "MygramPool",
+    "PooledConnection",
+    "PoolConfig",
+    "PoolStats",
+    "PoolEvent",
+    "RetryPolicy",
+    "CircuitBreakerConfig",
     # Config and Options
     "ClientConfig",
     "SearchOptions",
@@ -99,4 +117,8 @@ __all__ = [
     "TimeoutError",
     "InputValidationError",
     "ServerError",
+    "PoolTimeoutError",
+    "PoolExhaustedError",
+    "PoolClosedError",
+    "CircuitOpenError",
 ]

@@ -1,6 +1,7 @@
 # python-mygramdb-client
 
 [![CI](https://img.shields.io/github/actions/workflow/status/libraz/python-mygramdb-client/ci.yml?branch=main&label=CI)](https://github.com/libraz/python-mygramdb-client/actions)
+[![PyPI](https://img.shields.io/pypi/v/mygramdb-client)](https://pypi.org/project/mygramdb-client/)
 [![codecov](https://codecov.io/gh/libraz/python-mygramdb-client/branch/main/graph/badge.svg)](https://codecov.io/gh/libraz/python-mygramdb-client)
 [![Python](https://img.shields.io/badge/python-%E2%89%A53.9-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -8,7 +9,9 @@
 
 Python client library for [MygramDB](https://github.com/libraz/mygram-db/) — a high-performance in-memory full-text search engine with MySQL replication support.
 
-> Compatible with **MygramDB v1.6** (fuzzy search, highlight, facets, BM25).
+> Compatible with **MygramDB v1.8** (verbatim boolean transport, FACET `#`-value
+> preservation). v1.7 (multi-database, `search_raw`, runtime variables, on-demand
+> sync) and v1.6 (fuzzy search, highlight, facets, BM25) remain supported.
 
 ## Overview
 
@@ -25,9 +28,11 @@ MygramDB provides **25-200x faster** full-text search than MySQL FULLTEXT. This 
 
 - **Zero Dependencies** — Standard library only
 - **Async/Await API** — Modern asyncio-based interface with context manager support
+- **Connection Pooling** — Built-in `MygramPool` for high-throughput workloads, with per-command retry, circuit breaker, and observability hooks
+- **Resilient Transport** — Auto-reconnect, separate connect/command timeouts, and TCP keepalive
 - **Search Expression Parser** — Web-style search syntax (+required, -excluded, "phrase", OR, grouping)
 - **Full Protocol Support** — All MygramDB commands (SEARCH, COUNT, GET, INFO, CACHE, DUMP, OPTIMIZE, etc.)
-- **Type Safety** — Full type hints with dataclasses
+- **Type Safety** — Full type hints with dataclasses, shipped with a PEP 561 `py.typed` marker
 - **Input Validation** — Built-in protection against control character injection
 
 ## Installation
@@ -137,7 +142,9 @@ parse_table_identity('app_db.articles')       # ('app_db', 'articles')
 ### Boolean search
 
 `search()` sends the query as a single (auto-quoted) token. For boolean
-`AND`/`OR`/`NOT`/grouping, build the expression and pass it to `search_raw()`:
+`AND`/`OR`/`NOT`/grouping, build the expression and pass it to `search_raw()`,
+which sends it verbatim (unquoted, MygramDB v1.8+) so the server's AST parser
+sees the nested structure:
 
 ```python
 from mygramdb_client import convert_search_expression, SearchRawOptions
@@ -145,7 +152,7 @@ from mygramdb_client import convert_search_expression, SearchRawOptions
 raw = convert_search_expression('python OR (ruby AND rails)')
 res = await client.search_raw('articles', raw, SearchRawOptions(limit=50))
 
-# searchWithHighlights / searchRawWithHighlights enable the HIGHLIGHT clause:
+# search_with_highlights / search_raw_with_highlights enable the HIGHLIGHT clause:
 res = await client.search_with_highlights('articles', 'python')
 ```
 
@@ -160,9 +167,64 @@ print(await client.sync_status())
 await client.sync_stop('app_db.articles')
 ```
 
+## MygramDB v1.8 Features
+
+v1.8 refines two wire-protocol behaviors used by the client:
+
+- **Verbatim boolean transport** — `search_raw()` sends its expression unquoted,
+  so the server parses `AND`/`OR`/`NOT` and grouping, including OR groups nested
+  under AND. Control characters are still rejected before send.
+- **FACET `#`-value preservation** — a `facet()` value that starts with `#` is
+  kept; only tab-less `#` lines in the FACET response are treated as comments.
+
+```python
+# Boolean expression parsed by the server (unquoted transport)
+raw = convert_search_expression('python OR (ruby AND rails)')
+res = await client.search_raw('articles', raw, SearchRawOptions(limit=50))
+
+# '#hashtag'-style facet values are retained
+facets = await client.facet('articles', 'tags')
+```
+
+## High-throughput: Connection Pooling
+
+For hundreds of requests per second, use `MygramPool` instead of a single
+connection. It multiplexes concurrent requests over a bounded set of
+connections and layers on retry, a circuit breaker, and event hooks.
+
+```python
+from mygramdb_client import (
+    MygramPool, PoolConfig, ClientConfig,
+    RetryPolicy, CircuitBreakerConfig,
+)
+
+pool_config = PoolConfig(
+    min_connections=4,
+    max_connections=32,
+    acquire_timeout=2.0,
+    retry_policy=RetryPolicy(max_attempts=3),
+    circuit_breaker=CircuitBreakerConfig(failure_threshold=5, reset_timeout=10.0),
+)
+
+async with MygramPool(ClientConfig(host='localhost'), pool_config) as pool:
+    # Delegation API: acquire, run, release — with retry + breaker applied
+    result = await pool.search('articles', 'hello')
+
+    # Or check out a connection explicitly
+    async with pool.acquire() as client:
+        await client.count('articles', 'python')
+
+    print(pool.stats())  # PoolStats snapshot
+```
+
+See [docs/en/advanced-usage.md](docs/en/advanced-usage.md) for timeouts,
+auto-reconnect, and observability details.
+
 ## Type Hints
 
-Full type definitions are included:
+The package ships a PEP 561 `py.typed` marker, so type checkers (mypy, pyright)
+use its inline annotations directly — no stub package needed. Full type
+definitions are included:
 
 ```python
 from mygramdb_client import (

@@ -92,10 +92,13 @@ async def search_raw(
 ```
 
 Search using a pre-built boolean expression (MygramDB v1.7+). The expression is
-sent as one quoted token so the server's AST parser can interpret
-`AND` / `OR` / `NOT` / parentheses. Pair with
+sent verbatim (unquoted, MygramDB v1.8+) so the server's AST parser sees the
+nested `AND` / `OR` / `NOT` / grouping structure; a leading quote would collapse
+it into a single phrase. Pair with
 [`convert_search_expression()`](#convert_search_expression) to preserve OR /
 grouping semantics that `search()`'s AND/NOT decomposition cannot express.
+Control characters are rejected before the query is sent, so the unquoted
+transport stays injection-safe.
 
 **Parameters:**
 - `table` - Table name (bare or `database.table`)
@@ -145,6 +148,29 @@ Get a document by its primary key.
 - `primary_key` - Primary key value
 
 **Returns:** `Document` containing primary key and fields.
+
+#### facet() (v1.6+)
+
+```python
+async def facet(
+    table: str,
+    column: str,
+    options: Optional[FacetOptions] = None
+) -> FacetResponse
+```
+
+Aggregate distinct values of a filter column with per-value document counts.
+When `options.query` is empty, the whole table is aggregated; when set, the
+aggregation is scoped to matching documents (with optional AND/NOT/FILTER
+refinements).
+
+**Parameters:**
+- `table` - Table name (bare or `database.table`)
+- `column` - Filter column to aggregate
+- `options` - Optional `FacetOptions` (`query`, `and_terms`, `not_terms`,
+  `filters`, `limit`)
+
+**Returns:** `FacetResponse` containing facet values and counts.
 
 #### info()
 
@@ -266,6 +292,175 @@ async def sync_stop(table: Optional[str] = None) -> str
 Stop a running sync. With no table, stops every in-flight sync; with a table,
 stops only that table's sync.
 
+#### optimize()
+
+```python
+async def optimize(table: Optional[str] = None) -> None
+```
+
+Rebuild the index for one table, or every table when `table` is `None`.
+
+#### dump_save()
+
+```python
+async def dump_save(filepath: str) -> str
+```
+
+Save an index snapshot to a server-side file. Returns the path being written.
+
+#### dump_load()
+
+```python
+async def dump_load(filepath: str) -> None
+```
+
+Load the index from a server-side dump file.
+
+#### dump_status()
+
+```python
+async def dump_status() -> DumpStatus
+```
+
+Return the status of an in-flight or recent dump save/load.
+
+**Returns:** `DumpStatus` snapshot.
+
+#### dump_verify()
+
+```python
+async def dump_verify(filepath: str) -> str
+```
+
+Verify the integrity of a dump file. Returns the raw verification response.
+
+#### dump_info()
+
+```python
+async def dump_info(filepath: str) -> str
+```
+
+Return metadata about a dump file as the raw server response string.
+
+#### cache_stats()
+
+```python
+async def cache_stats() -> CacheStats
+```
+
+Return query-cache statistics.
+
+**Returns:** `CacheStats` with hit/miss counters and memory usage.
+
+#### cache_clear()
+
+```python
+async def cache_clear(table: Optional[str] = None) -> None
+```
+
+Clear the query cache for one table, or all caches when `table` is `None`.
+
+#### cache_enable()
+
+```python
+async def cache_enable() -> None
+```
+
+Enable the query cache.
+
+#### cache_disable()
+
+```python
+async def cache_disable() -> None
+```
+
+Disable the query cache.
+
+---
+
+## MygramPool
+
+A pool of `MygramClient` connections for high-throughput workloads. Each pooled
+connection still serializes its own commands, so effective concurrency is bounded
+by `PoolConfig.max_connections`. Pooled connections always run with
+`auto_reconnect` enabled.
+
+### Constructor
+
+```python
+MygramPool(
+    config: Optional[ClientConfig] = None,
+    pool_config: Optional[PoolConfig] = None,
+)
+```
+
+### Methods
+
+#### open()
+
+```python
+async def open() -> None
+```
+
+Eagerly open `PoolConfig.min_connections` connections. Also invoked by
+`async with pool:`.
+
+#### close()
+
+```python
+async def close() -> None
+```
+
+Close the pool and disconnect every connection it owns.
+
+#### acquire()
+
+```python
+def acquire() -> PooledConnection
+```
+
+Return an async context manager that yields a checked-out `MygramClient`; the
+connection is returned to the pool on exit.
+
+```python
+async with pool.acquire() as client:
+    result = await client.search('articles', 'hello')
+```
+
+**Raises:**
+- `PoolTimeoutError` - If no connection becomes free within `acquire_timeout`
+- `PoolExhaustedError` - If the waiter queue is already at `max_pending`
+- `PoolClosedError` - If the pool has been closed
+
+#### Delegation API
+
+```python
+async def search(table, query, options=None) -> SearchResponse
+async def search_raw(table, raw_query, options=None) -> SearchResponse
+async def count(table, query, options=None) -> CountResponse
+async def get(table, primary_key) -> Document
+async def facet(table, column, options=None) -> FacetResponse
+async def info() -> ServerInfo
+```
+
+Read-only convenience methods that acquire a connection, run the command, and
+release it — with `PoolConfig.retry_policy` and `PoolConfig.circuit_breaker`
+applied. For anything stateful (replication, sync, `set_variable`), acquire a
+connection explicitly with `acquire()`.
+
+#### stats()
+
+```python
+def stats() -> PoolStats
+```
+
+Return a point-in-time `PoolStats` snapshot.
+
+### PooledConnection
+
+Async context manager returned by `MygramPool.acquire()`. Yields the underlying
+`MygramClient` on enter and returns it to the pool on exit.
+
 ---
 
 ## Types
@@ -277,10 +472,20 @@ stops only that table's sync.
 class ClientConfig:
     host: str = "127.0.0.1"
     port: int = 11016
-    timeout: float = 5.0
+    socket_path: str = ""                     # Unix socket path (overrides host/port when set)
+    timeout: float = 5.0                      # Fallback for connect/command timeouts
+    connect_timeout: Optional[float] = None   # Connection deadline (None -> timeout)
+    command_timeout: Optional[float] = None   # Per-response read deadline (None -> timeout)
     recv_buffer_size: int = 65536
     max_query_length: int = 128
+    auto_reconnect: bool = False              # Reconnect+resend if the socket died before the write
+    tcp_keepalive: bool = True                # SO_KEEPALIVE on TCP connections
+    tcp_keepalive_idle: int = 60              # Idle seconds before the first keepalive probe
 ```
+
+`auto_reconnect` only resends when the socket is found dead *before* the request
+is written; a drop *after* the write is surfaced as `ConnectionError` without
+resending, so a possibly-applied command is never silently repeated.
 
 ### SearchOptions
 
@@ -292,9 +497,24 @@ class SearchOptions:
     and_terms: List[str] = field(default_factory=list)
     not_terms: List[str] = field(default_factory=list)
     filters: Dict[str, str] = field(default_factory=dict)
-    sort_column: Optional[str] = None
+    sort_column: Optional[str] = None             # "_score" for BM25 relevance (v1.6+); None = primary key
     sort_desc: bool = True
+    fuzzy: int = 0                                # Levenshtein distance 0/1/2 (v1.6+)
+    highlight: Optional[HighlightOptions] = None  # enable HIGHLIGHT when set (v1.6+)
 ```
+
+### HighlightOptions (v1.6+)
+
+```python
+@dataclass
+class HighlightOptions:
+    open_tag: str = ""       # opening tag; set together with close_tag (server default <em>)
+    close_tag: str = ""      # closing tag; set together with open_tag (server default </em>)
+    snippet_len: int = 0     # code points per snippet, 1..10000 (0 = server default 100)
+    max_fragments: int = 0   # fragments per document, 1..100 (0 = server default 3)
+```
+
+An empty `HighlightOptions()` enables highlighting with server defaults.
 
 ### SearchRawOptions (v1.7+)
 
@@ -316,6 +536,18 @@ class CountOptions:
     filters: Dict[str, str] = field(default_factory=dict)
 ```
 
+### FacetOptions (v1.6+)
+
+```python
+@dataclass
+class FacetOptions:
+    query: str = ""                                      # empty = aggregate the whole table
+    and_terms: List[str] = field(default_factory=list)
+    not_terms: List[str] = field(default_factory=list)
+    filters: Dict[str, str] = field(default_factory=dict)
+    limit: int = 0                                       # max facet values (0 = no limit)
+```
+
 ### SearchResponse
 
 ```python
@@ -333,6 +565,7 @@ class SearchResponse:
 class SearchResult:
     primary_key: str
     score: Optional[float] = None
+    snippet: Optional[str] = None   # set only when HIGHLIGHT was requested (v1.6+)
 ```
 
 ### CountResponse
@@ -342,6 +575,23 @@ class SearchResult:
 class CountResponse:
     count: int
     debug: Optional[DebugInfo] = None
+```
+
+### FacetValue (v1.6+)
+
+```python
+@dataclass
+class FacetValue:
+    value: str
+    count: int
+```
+
+### FacetResponse (v1.6+)
+
+```python
+@dataclass
+class FacetResponse:
+    results: List[FacetValue] = field(default_factory=list)
 ```
 
 ### Document
@@ -375,6 +625,42 @@ class ReplicationStatus:
     running: bool = False
     gtid: str = ""
     status_str: str = ""
+    processed_events: int = 0  # total binlog events processed (multi-line response)
+    queue_size: int = 0        # pending events in the apply queue (multi-line response)
+```
+
+### DumpStatus
+
+```python
+@dataclass
+class DumpStatus:
+    status: str = ""
+    filepath: str = ""
+    tables_total: int = 0
+    tables_processed: int = 0
+    current_table: str = ""
+    elapsed_seconds: float = 0.0
+    save_in_progress: bool = False
+    load_in_progress: bool = False
+    result_filepath: str = ""
+    error: str = ""
+```
+
+### CacheStats
+
+```python
+@dataclass
+class CacheStats:
+    enabled: bool = False
+    hits: int = 0
+    misses: int = 0
+    hit_rate: float = 0.0
+    current_entries: int = 0
+    memory_bytes: int = 0
+    evictions: int = 0
+    max_memory_mb: float = 0.0
+    current_memory_mb: float = 0.0
+    ttl_seconds: int = 0
 ```
 
 ### DebugInfo
@@ -393,6 +679,10 @@ class DebugInfo:
     after_filters: int = 0
     final: int = 0
     optimization: str = ""
+    sort: Optional[str] = None
+    cache: Optional[str] = None
+    cache_age_ms: Optional[float] = None
+    cache_saved_ms: Optional[float] = None
     limit: Optional[int] = None
     offset: Optional[int] = None
 ```
@@ -405,6 +695,76 @@ class SimplifiedExpression:
     main_term: str
     and_terms: List[str] = field(default_factory=list)
     not_terms: List[str] = field(default_factory=list)
+```
+
+### PoolConfig
+
+```python
+@dataclass
+class PoolConfig:
+    min_connections: int = 1                 # Opened eagerly by MygramPool.open()
+    max_connections: int = 10                # Upper bound / concurrency ceiling
+    acquire_timeout: Optional[float] = 5.0   # Wait cap when saturated (None = forever)
+    max_pending: int = 0                     # Waiter-queue cap (0 = unbounded)
+    max_connection_lifetime: float = 0.0     # Recycle after N seconds (0 = disabled)
+    idle_health_check_interval: float = 30.0 # Validate before hand-out after N idle seconds
+    retry_policy: Optional[RetryPolicy] = None            # Applied to the delegation API
+    circuit_breaker: Optional[CircuitBreakerConfig] = None
+    on_event: Optional[Callable[[PoolEvent, Dict[str, Any]], None]] = None
+```
+
+### RetryPolicy
+
+```python
+@dataclass
+class RetryPolicy:
+    max_attempts: int = 3
+    base_delay: float = 0.05
+    max_delay: float = 1.0
+    retryable: Tuple[Type[BaseException], ...] = (TimeoutError, ConnectionError)
+```
+
+Exponential backoff with full jitter. Only exceptions in `retryable` are retried;
+`ServerError` / `InputValidationError` / `ProtocolError` are never retried because
+resending cannot change the outcome. The pool applies it only to its read-only
+delegation API.
+
+### CircuitBreakerConfig
+
+```python
+@dataclass
+class CircuitBreakerConfig:
+    failure_threshold: int = 5   # Consecutive failures before the breaker opens
+    reset_timeout: float = 10.0  # Seconds open before a half-open trial
+```
+
+### PoolEvent
+
+```python
+class PoolEvent(str, Enum):
+    ACQUIRE = "acquire"                          # {"wait_seconds": float}
+    CONNECTION_DISCARDED = "connection_discarded"
+    RETRY = "retry"                              # {"attempt": int, "error": str}
+    BREAKER_STATE_CHANGE = "breaker_state_change"  # {"state": str}
+```
+
+Observability events delivered to `PoolConfig.on_event`. The callback is
+synchronous and its exceptions are swallowed so instrumentation cannot disrupt
+the pool.
+
+### PoolStats
+
+```python
+@dataclass
+class PoolStats:
+    total_connections: int = 0
+    available: int = 0
+    in_use: int = 0
+    pending_waiters: int = 0
+    total_acquires: int = 0
+    total_acquire_wait_seconds: float = 0.0
+    dead_connections_discarded: int = 0
+    reconnects: int = 0
 ```
 
 ---
@@ -423,7 +783,9 @@ class MygramError(Exception):
 
 ### ConnectionError
 
-Raised when connection fails.
+Raised when connection fails. Also subclasses the builtin `ConnectionError`
+(an `OSError`), so `except ConnectionError` catches it whether the caller means
+the builtin or this library class.
 
 ### ProtocolError
 
@@ -431,7 +793,9 @@ Raised when server returns an invalid response.
 
 ### TimeoutError
 
-Raised when an operation times out.
+Raised when an operation times out. Also subclasses the builtin `TimeoutError`;
+on Python 3.11+ that is the same class as `asyncio.TimeoutError`, so
+`except TimeoutError` (builtin or asyncio) catches it too.
 
 ### InputValidationError
 
@@ -440,6 +804,25 @@ Raised when input validation fails.
 ### ServerError
 
 Raised when server returns an error response.
+
+### PoolTimeoutError
+
+Raised when acquiring a pooled connection exceeds `PoolConfig.acquire_timeout`.
+Subclasses `TimeoutError`, so existing timeout handlers still catch it.
+
+### PoolExhaustedError
+
+Raised when the pool's waiter queue is already at `PoolConfig.max_pending` and a
+new `acquire()` would have to wait.
+
+### PoolClosedError
+
+Raised when acquiring from a pool that has already been closed.
+
+### CircuitOpenError
+
+Raised by the pool's delegation API — without touching the network — while the
+circuit breaker is open.
 
 ---
 

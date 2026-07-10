@@ -148,10 +148,10 @@ except ValueError as e:
 ```python
 @dataclass
 class SearchExpression:
-    required_terms: List[str]   # + プレフィックス付きターム
-    excluded_terms: List[str]   # - プレフィックス付きターム
-    optional_terms: List[str]   # プレフィックスなしターム
-    raw_expression: str         # 元の式（複雑な式用）
+    required_terms: List[str] = field(default_factory=list)  # + プレフィックス付きターム
+    excluded_terms: List[str] = field(default_factory=list)  # - プレフィックス付きターム
+    optional_terms: List[str] = field(default_factory=list)  # プレフィックスなしターム
+    raw_expression: str = ""                                 # 元の式（複雑な式用）
 ```
 
 ### SimplifiedExpression
@@ -159,9 +159,9 @@ class SearchExpression:
 ```python
 @dataclass
 class SimplifiedExpression:
-    main_term: str              # 最初の正のターム
-    and_terms: List[str]        # 追加の AND ターム
-    not_terms: List[str]        # 除外ターム
+    main_term: str                                    # 最初の正のターム
+    and_terms: List[str] = field(default_factory=list)  # 追加の AND ターム
+    not_terms: List[str] = field(default_factory=list)  # 除外ターム
 ```
 
 ### 関数

@@ -5,6 +5,7 @@ This module provides an async client for connecting to and querying MygramDB ser
 """
 import asyncio
 import re
+import socket
 from dataclasses import replace
 from typing import Dict, List, Optional
 
@@ -107,18 +108,57 @@ class MygramClient:
             if self.config.socket_path:
                 self._reader, self._writer = await asyncio.wait_for(
                     asyncio.open_unix_connection(self.config.socket_path),
-                    timeout=self.config.timeout,
+                    timeout=self._connect_timeout(),
                 )
             else:
                 self._reader, self._writer = await asyncio.wait_for(
                     asyncio.open_connection(self.config.host, self.config.port),
-                    timeout=self.config.timeout,
+                    timeout=self._connect_timeout(),
                 )
+                if self.config.tcp_keepalive:
+                    self._apply_keepalive()
             self._connected = True
         except asyncio.TimeoutError:
             raise TimeoutError("Connection timeout")
         except OSError as e:
             raise ConnectionError(f"Failed to connect: {e}")
+
+    def _connect_timeout(self) -> float:
+        """Effective connect timeout (``connect_timeout`` or ``timeout``)."""
+        if self.config.connect_timeout is not None:
+            return self.config.connect_timeout
+        return self.config.timeout
+
+    def _command_timeout(self) -> float:
+        """Effective per-read timeout (``command_timeout`` or ``timeout``)."""
+        if self.config.command_timeout is not None:
+            return self.config.command_timeout
+        return self.config.timeout
+
+    def _apply_keepalive(self) -> None:
+        """
+        Enable TCP keepalive on the freshly opened socket. Best-effort: any
+        option unsupported on the current platform is skipped rather than
+        failing the connection.
+        """
+        if self._writer is None:
+            return
+        sock = self._writer.get_extra_info("socket")
+        if sock is None:
+            return
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            idle = self.config.tcp_keepalive_idle
+            if hasattr(socket, "TCP_KEEPIDLE"):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, idle)
+            elif hasattr(socket, "TCP_KEEPALIVE"):  # macOS name for KEEPIDLE
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPALIVE, idle)
+            if hasattr(socket, "TCP_KEEPINTVL"):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, idle)
+            if hasattr(socket, "TCP_KEEPCNT"):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+        except OSError:
+            pass
 
     async def disconnect(self) -> None:
         """Disconnect from server."""
@@ -287,8 +327,9 @@ class MygramClient:
         """
         Search using a pre-built boolean expression (MygramDB v1.7+).
 
-        The expression is sent as one quoted token so the server's AST parser
-        can interpret ``AND`` / ``OR`` / ``NOT`` / parentheses. Pair this with
+        The expression is sent verbatim (unquoted) so the server's AST parser
+        can tokenize and interpret ``AND`` / ``OR`` / ``NOT`` / parentheses —
+        including OR groups nested under AND (MygramDB v1.8+). Pair this with
         :func:`convert_search_expression` to preserve OR / grouping semantics
         that :meth:`search`'s AND/NOT decomposition cannot express.
 
@@ -318,7 +359,13 @@ class MygramClient:
         ensure_safe_command_value(raw_query, "raw_query")
         validate_highlight(opts.highlight)
 
-        parts: List[str] = ["SEARCH", table, escape_query_string(raw_query)]
+        # Send the boolean expression verbatim (unquoted). escape_query_string
+        # would wrap an expression containing whitespace in quotes, which the
+        # server then treats as a single literal phrase, defeating AND/OR/NOT
+        # tokenization and grouping (notably OR groups nested under AND). The
+        # expression was validated above as non-empty and free of control
+        # characters, so it cannot inject a second command. MygramDB v1.8+.
+        parts: List[str] = ["SEARCH", table, raw_query]
         self._append_highlight_clause(parts, opts.highlight)
         self._append_limit_offset(parts, opts.limit, opts.offset)
 
@@ -833,44 +880,117 @@ class MygramClient:
             TimeoutError: If command times out.
             ProtocolError: If server returns an error.
         """
-        if not self._connected or not self._writer or not self._reader:
+        if not self.config.auto_reconnect and (
+            not self._connected or not self._writer or not self._reader
+        ):
             raise ConnectionError("Not connected to server")
 
         async with self._get_command_lock():
+            return await self._send_locked(command)
+
+    async def _send_locked(self, command: str) -> str:
+        """
+        Send a single command and read its response while holding the command
+        lock. With ``auto_reconnect``, a dead socket detected *before* the
+        request is written triggers one reconnect-and-resend; a failure *after*
+        the write is surfaced without resending (the command may have applied).
+        """
+        reconnected = False
+        payload = f"{command}\r\n".encode("utf-8")
+
+        while True:
+            if not self._connected or not self._writer or not self._reader:
+                if self.config.auto_reconnect and not reconnected:
+                    reconnected = True
+                    await self._reconnect()
+                else:
+                    raise ConnectionError("Not connected to server")
+
+            # Streams are live past the guard (either already open or just
+            # re-established by _reconnect).
+            assert self._writer is not None and self._reader is not None
+
+            # Send phase: a failure here has written nothing the server acted
+            # on, so it is safe to reconnect and resend once.
             try:
-                # Send command
-                self._writer.write(f"{command}\r\n".encode("utf-8"))
+                self._writer.write(payload)
                 await self._writer.drain()
-
-                # Read response
-                response = await self._read_response()
-
-                # Normalize CRLF to LF
-                response = response.replace("\r\n", "\n").strip()
-
-                # Check for error response
-                if response.startswith("ERROR "):
-                    raise ServerError(response[6:])
-
-                return response
-
             except asyncio.TimeoutError:
                 raise TimeoutError("Command timeout")
             except OSError as e:
                 self._connected = False
+                if self.config.auto_reconnect and not reconnected:
+                    reconnected = True
+                    await self._reconnect()
+                    continue
                 raise ConnectionError(f"Connection error: {e}")
 
+            # Read phase: past this point the command was delivered, so a
+            # failure is reported rather than silently resent. Any read failure
+            # also tears the connection down: a timed-out or aborted read may
+            # leave the server's (late) response in the kernel buffer, and
+            # reusing the socket would read that stale reply as the next
+            # command's response. TimeoutError is caught explicitly rather than
+            # via asyncio.TimeoutError, which is a distinct class before Python
+            # 3.11 — matching on it there lets the custom TimeoutError fall
+            # through to the OSError branch and be mis-reported as a
+            # ConnectionError.
+            try:
+                response = await self._read_response()
+            except TimeoutError:
+                self._connected = False
+                raise
+            except ConnectionError:
+                # EOF from _read_response: mark dead so the next call can heal.
+                self._connected = False
+                raise
+            except OSError as e:
+                self._connected = False
+                raise ConnectionError(f"Connection error: {e}")
+
+            # Normalize CRLF to LF
+            response = response.replace("\r\n", "\n").strip()
+
+            # Check for error response
+            if response.startswith("ERROR "):
+                raise ServerError(response[6:])
+
+            return response
+
+    async def _reconnect(self) -> None:
+        """
+        Tear down any half-open socket and reconnect. The caller holds the
+        command lock. ``wait_closed`` is skipped so a dead socket cannot stall
+        the reconnect.
+        """
+        if self._writer is not None:
+            try:
+                self._writer.close()
+            except Exception:
+                pass
+        self._reader = None
+        self._writer = None
+        self._connected = False
+        await self.connect()
+
     async def _read_response(self) -> str:
-        """Read complete response from server."""
+        """Read complete response from server.
+
+        Bytes are accumulated in place and decoded once the framing is
+        complete. The completeness probe decodes leniently (``errors="ignore"``)
+        so a multibyte character split across two reads cannot raise mid-stream;
+        terminators are ASCII, so ignoring a trailing partial code point never
+        hides one. The returned string is a strict decode of the full buffer.
+        """
         # Only reached from send_command, which guarantees a live connection.
         assert self._reader is not None
-        buffer = ""
+        buffer = bytearray()
 
         while True:
             try:
                 data = await asyncio.wait_for(
                     self._reader.read(self.config.recv_buffer_size),
-                    timeout=self.config.timeout,
+                    timeout=self._command_timeout(),
                 )
             except asyncio.TimeoutError:
                 raise TimeoutError("Read timeout")
@@ -878,11 +998,12 @@ class MygramClient:
             if not data:
                 raise ConnectionError("Connection closed by server")
 
-            buffer += data.decode("utf-8")
+            buffer.extend(data)
 
-            # Check if response is complete
-            if self._is_response_complete(buffer):
-                return buffer
+            # Check if response is complete (lenient probe on partial bytes).
+            probe = buffer.decode("utf-8", errors="ignore")
+            if self._is_response_complete(probe):
+                return buffer.decode("utf-8")
 
     # Multi-line response prefixes that terminate with "END\r\n" (or "END\n").
     # Matched against the first line of the buffer; the suffix is the value
@@ -1057,7 +1178,9 @@ class MygramClient:
             <value2>\\t<count2>
             ...
 
-        Lines starting with ``#`` (debug/comment) are ignored.
+        Comment lines (``#`` with no tab) are ignored. A facet value may itself
+        start with ``#``; such a row still carries a tab separating the value
+        from its count, so it is kept (MygramDB v1.8+).
         """
         lines = response.split("\n")
         first_line = lines[0]
@@ -1075,9 +1198,9 @@ class MygramClient:
 
         results: List[FacetValue] = []
         for line in lines[1:]:
-            if line == "" or line.startswith("#"):
-                continue
             tab = line.find("\t")
+            if line == "" or (line.startswith("#") and tab < 0):
+                continue
             if tab < 0:
                 raise ProtocolError(f"Invalid FACET row: {line}")
             value = line[:tab]

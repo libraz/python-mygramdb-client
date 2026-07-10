@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-10
+
+### Added
+
+- Connection pool (`MygramPool`) for high-throughput workloads
+  - Fixed-ceiling pool multiplexing many concurrent requests over
+    `min_connections`..`max_connections` connections, with FIFO wait fairness,
+    validate-before-hand-out, and lifetime-based connection rotation
+    (`PoolConfig`)
+  - `pool.acquire()` async context manager yielding a checked-out
+    `MygramClient` (`PooledConnection`), plus a read-only delegation API
+    (`pool.search` / `search_raw` / `count` / `get` / `facet` / `info`)
+  - `PoolStats` snapshot via `pool.stats()` (live/idle/in-use connections,
+    cumulative acquire waits, discards, reconnects)
+  - `pool.close()` promptly releases callers blocked in `acquire()` with
+    `PoolClosedError` instead of leaving them waiting on a queue that will
+    never be refilled
+- Resilience primitives, opt-in via `PoolConfig`
+  - `RetryPolicy` — exponential backoff with full jitter, applied to the pool's
+    read-only delegation API; only transient failures (`TimeoutError`,
+    `ConnectionError`) are retried by default
+  - `CircuitBreakerConfig` — trips after `failure_threshold` consecutive
+    connect/timeout failures and fails fast with `CircuitOpenError` for
+    `reset_timeout` seconds before a half-open trial
+  - Observability hook: `PoolConfig.on_event` receives `PoolEvent` notifications
+    (acquire wait, connection discarded, retry, breaker state change)
+- `ClientConfig` transport controls
+  - `auto_reconnect` — transparently reconnect and resend a command when the
+    socket is found dead *before* the request is written (a post-write drop is
+    surfaced without resending, preserving non-idempotent command safety)
+  - Separate `connect_timeout` / `command_timeout` (both fall back to `timeout`)
+  - `tcp_keepalive` / `tcp_keepalive_idle` (enabled by default on TCP) to detect
+    a silently dropped peer without waiting for the next read timeout
+  - `socket_path` for Unix-domain-socket connections
+- New exceptions: `PoolTimeoutError`, `PoolExhaustedError`, `PoolClosedError`,
+  `CircuitOpenError`
+- `py.typed` marker (PEP 561): the package now ships inline type information, so
+  downstream type checkers use its annotations directly
+
+### Changed
+
+- `ConnectionError` and `TimeoutError` now also subclass the builtin
+  `ConnectionError` / `TimeoutError` (which derive from `OSError`). Existing
+  `except MygramError` handlers are unaffected, and callers can now also catch
+  them as the builtins (or, on Python 3.11+, `TimeoutError` as
+  `asyncio.TimeoutError`) without importing the library names
+- MygramDB v1.8.0 protocol
+  - `search_raw` / `search_raw_with_highlights` now send the boolean expression
+    verbatim (unquoted) so the server's AST parser sees nested `AND` / `OR` /
+    `NOT` / grouping. The previous single-quoted-token transport collapsed a
+    grouped expression into one phrase; control characters are still rejected up
+    front, so the unquoted send remains injection-safe
+  - FACET responses preserve `#`-prefixed values (a leading `#` is only treated
+    as a comment marker when the line carries no tab-separated count)
+- `_read_response` now decodes the reply from an accumulated byte buffer,
+  fixing a rare decode failure when a multi-byte UTF-8 sequence straddled a
+  socket read boundary
+- A command that fails mid-read (timeout or socket error) now tears its
+  connection down, so the server's late response can never be read as the next
+  command's reply. A read timeout consistently raises `TimeoutError` (rather
+  than being reported as a `ConnectionError` on Python 3.9 / 3.10)
+
 ## [1.2.1] - 2026-06-15
 
 ### Fixed
@@ -138,7 +200,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Input validation and error handling
 - Full type hints with dataclasses
 
-[Unreleased]: https://github.com/libraz/python-mygramdb-client/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/libraz/python-mygramdb-client/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/libraz/python-mygramdb-client/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/libraz/python-mygramdb-client/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/libraz/python-mygramdb-client/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/libraz/python-mygramdb-client/compare/v1.1.0...v1.1.1

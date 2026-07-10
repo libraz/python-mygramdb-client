@@ -24,7 +24,7 @@ docker compose -f tests/docker/docker-compose.yml down -v
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `MYGRAMDB_VERSION` | `1.7.0` | Server image tag (`ghcr.io/libraz/mygram-db:<tag>`; e.g. `1.7`, `latest`) |
+| `MYGRAMDB_VERSION` | `1.8.0` | Server image tag (`ghcr.io/libraz/mygram-db:<tag>`; e.g. `1.8`, `latest`) |
 | `MYSQL_VERSION` | `8.4` | MySQL image tag |
 | `MYGRAM_PORT` | `11016` | Host port mapped to the server's TCP API |
 | `MYGRAM_HTTP_PORT` | `18080` | Host port mapped to the server's HTTP/health API |
@@ -46,11 +46,13 @@ checks, among others:
   and bare/qualified names resolving identically on a single-database server
 - multi-word phrase quoting and `enabled = 1` required-filter visibility
 - Japanese (ngram) matching
-- `search_raw` boolean `OR`
+- `search_raw` boolean `OR`, including an `OR` group nested under `AND`
+  (unquoted boolean transport, MygramDB v1.8+)
 - `facet` aggregation by category
 - `search_with_highlights` snippet wrapping (server runs with `verify_text: all`)
+- `MygramPool` delegation and concurrent round-trips against the live server
 
-The version-agnostic v1.7 round-trip checks (`search_raw`, `set_variable` /
+The version-agnostic round-trip checks (`search_raw`, `set_variable` /
 `show_variables`, `sync` family) also run without the seed, against any server.
 
 ## Files

@@ -202,9 +202,15 @@ async def debug_example():
 |-----------|-----|----------|------|
 | `host` | str | "127.0.0.1" | サーバーのホスト名 |
 | `port` | int | 11016 | サーバーのポート |
-| `timeout` | float | 5.0 | 接続・読み取りタイムアウト（秒） |
+| `socket_path` | str | "" | Unix ソケットパス。指定時は host/port より優先 |
+| `timeout` | float | 5.0 | 接続・コマンド読み取りのデフォルトタイムアウト（秒） |
+| `connect_timeout` | Optional[float] | None | 接続のデッドライン。未指定なら `timeout` にフォールバック |
+| `command_timeout` | Optional[float] | None | レスポンス読み取りのデッドライン。未指定なら `timeout` にフォールバック |
 | `recv_buffer_size` | int | 65536 | 受信バッファサイズ（バイト） |
 | `max_query_length` | int | 128 | クエリ式の最大長 |
+| `auto_reconnect` | bool | False | 書き込み前に切断を検出したら再接続＋再送 |
+| `tcp_keepalive` | bool | True | TCP 接続で `SO_KEEPALIVE` を有効化 |
+| `tcp_keepalive_idle` | int | 60 | 最初のキープアライブ探索までのアイドル秒数 |
 
 ## エラーハンドリング
 
@@ -237,6 +243,24 @@ async def error_handling_example():
     finally:
         await client.disconnect()
 ```
+
+## MygramDB v1.8 に関する注記
+
+MygramDB v1.8 サーバーを対象とする場合、2 つのワイヤープロトコルの挙動が
+関係します。
+
+- **引用符なしのブール式送信**。`search_raw()` は式を引用符なしで送信するため、
+  サーバーが `AND` / `OR` / `NOT` と括弧によるグループ化（AND の下にネストした
+  OR グループを含む）を解釈できます。式は `convert_search_expression()` で
+  構築してください。制御文字は送信前に拒否されるため、引用符なしの送信でも
+  インジェクションに対して安全です。
+- **FACET の `#` 値**。`#` で始まる `facet()` の値は保持されます。FACET レスポンス
+  の中でタブを含まない `#` 行のみがコメントとして扱われるため、（カウントの前に
+  タブを持つ）正当な `#tag` 形式の値は保持されます。
+
+MygramDB v1.7 機能（マルチデータベース、`search_raw`、ランタイム変数、
+オンデマンド同期）および v1.6 機能（ファジー検索、ハイライト、ファセット、BM25）
+も継続してサポートされます。
 
 ## 次のステップ
 

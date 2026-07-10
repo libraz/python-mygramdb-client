@@ -4,80 +4,42 @@
 
 ## コネクションプーリング
 
-高性能なアプリケーションでは、コネクションプーリングを実装して接続を再利用します：
+`MygramClient` は 1 本の接続を持ち、その上で全コマンドを直列化するため、単一クライアントでは同時に 1 リクエストしか処理できません。秒間数百リクエスト規模の高負荷では、組み込みの `MygramPool` を使います。複数接続へリクエストを分散し、貸出前に接続を検証し、死んだ接続を透過的に作り直します。
 
 ```python
-import asyncio
-from typing import List, Callable
-from mygramdb_client import MygramClient, ClientConfig
+from mygramdb_client import MygramClient, MygramPool, ClientConfig, PoolConfig
 
-class MygramPool:
-    def __init__(self, config: ClientConfig, pool_size: int = 10):
-        self.config = config
-        self.pool_size = pool_size
-        self.clients: List[MygramClient] = []
-        self.available: List[MygramClient] = []
-        self.pending: List[Callable[[MygramClient], None]] = []
-        self._lock = asyncio.Lock()
-
-    async def init(self) -> None:
-        for _ in range(self.pool_size):
-            client = MygramClient(self.config)
-            await client.connect()
-            self.clients.append(client)
-            self.available.append(client)
-
-    async def acquire(self) -> MygramClient:
-        async with self._lock:
-            if self.available:
-                return self.available.pop()
-
-        # 利用可能なクライアントを待機
-        future: asyncio.Future[MygramClient] = asyncio.Future()
-        self.pending.append(lambda c: future.set_result(c))
-        return await future
-
-    async def release(self, client: MygramClient) -> None:
-        async with self._lock:
-            if self.pending:
-                callback = self.pending.pop(0)
-                callback(client)
-            else:
-                self.available.append(client)
-
-    async def close(self) -> None:
-        for client in self.clients:
-            await client.disconnect()
-        self.clients.clear()
-        self.available.clear()
-
-    def get_stats(self) -> dict:
-        return {
-            'total': len(self.clients),
-            'available': len(self.available),
-            'in_use': len(self.clients) - len(self.available),
-            'pending': len(self.pending),
-        }
-
-
-# 使用例
 async def main():
     pool = MygramPool(
         ClientConfig(host='localhost', port=11016),
-        pool_size=10
+        PoolConfig(min_connections=2, max_connections=10, acquire_timeout=5.0),
     )
-    await pool.init()
-
-    client = await pool.acquire()
+    await pool.open()  # min_connections を事前接続
     try:
-        results = await client.search('articles', 'test')
-        print(results)
-    finally:
-        await pool.release(client)
+        # 委譲 API: acquire -> 実行 -> release を 1 呼び出しで行う
+        result = await pool.search('articles', 'test')
+        print(result.total_count)
 
-    print(pool.get_stats())
-    await pool.close()
+        # 明示的に接続を借りることもできる
+        async with pool.acquire() as client:
+            result = await client.search('articles', 'test')
+            print(result.total_count)
+
+        print(pool.stats())
+    finally:
+        await pool.close()
 ```
+
+`MygramPool` は async context manager でもあるため、`open()` / `close()` を自動化できます。
+
+```python
+async with MygramPool(ClientConfig(host='localhost')) as pool:
+    result = await pool.search('articles', 'test')
+```
+
+実効的な同時実行数は `max_connections` が上限になります。プールが飽和すると `acquire()` は `acquire_timeout` まで待機し、超過すると `PoolTimeoutError` を送出します。`max_pending` を設定すると待ち行列に上限を設け、無制限に待たせる代わりに `PoolExhaustedError` で即座に失敗させられます。
+
+> プール管理下の接続は `auto_reconnect` が有効な状態で扱われるため、使用の合間に切れた接続は次のコマンドで自己修復します。
 
 ## コンテキストマネージャパターン
 
@@ -135,7 +97,7 @@ async def main():
 
 ## プールを使った並列処理
 
-コネクションプーリングと並列処理を組み合わせます：
+複数クエリを並行して投げます。プールは同時実行数を `max_connections` に制限し、各呼び出しを個別の接続で処理します。
 
 ```python
 async def parallel_search(
@@ -143,14 +105,9 @@ async def parallel_search(
     table: str,
     queries: List[str]
 ) -> List[SearchResponse]:
-    async def search_one(query: str) -> SearchResponse:
-        client = await pool.acquire()
-        try:
-            return await client.search(table, query)
-        finally:
-            await pool.release(client)
-
-    return await asyncio.gather(*[search_one(q) for q in queries])
+    return await asyncio.gather(*[
+        pool.search(table, query) for query in queries
+    ])
 
 
 # 使用例
@@ -213,49 +170,79 @@ async def main():
 
 ## リトライロジック
 
-一時的な障害に対する自動リトライを実装します：
+`RetryPolicy` をプールに渡すと、読み取り系の委譲 API（`search` / `count` / `get` / `facet` / `info`）に自動リトライが適用されます。指数バックオフ + full jitter で待機し、リトライ対象は接続・タイムアウト系のエラーのみです。サーバーが拒否した `ServerError`、入力不正の `InputValidationError`、フレーミング不整合の `ProtocolError` は再送しても結果が変わらないためリトライしません。
 
 ```python
-import asyncio
+from mygramdb_client import MygramPool, ClientConfig, PoolConfig, RetryPolicy
+
+pool = MygramPool(
+    ClientConfig(host='localhost'),
+    PoolConfig(
+        max_connections=10,
+        retry_policy=RetryPolicy(max_attempts=3, base_delay=0.05, max_delay=1.0),
+    ),
+)
+await pool.open()
+
+# リトライは透過的に適用される
+result = await pool.search('articles', 'test')
+```
+
+素の `MygramClient` では、再呼び出し可能なコルーチンを同じポリシーで包みます。
+
+```python
+policy = RetryPolicy(max_attempts=3)
+result = await policy.run(lambda: client.search('articles', 'test'))
+```
+
+副作用を伴うコマンド（`DUMP` / `OPTIMIZE` / `SYNC` / レプリケーション制御）は委譲 API に含まれず、自動リトライの対象になりません。
+
+## サーキットブレーカー
+
+サーバー障害中にすべてのリクエストをリトライすると、接続試行とタイムアウトが積み上がるだけです。`CircuitBreakerConfig` をプールに渡すと、代わりに即座に失敗させられます。連続する接続・タイムアウト失敗が `failure_threshold` に達するとブレーカーが open になり、委譲 API はネットワークに触れず `CircuitOpenError` を送出します。`reset_timeout` 秒後に 1 件だけ試行を通し、成功すれば close に戻ります。ブレーカーはリトライポリシーの外側にあるため、open 中はリトライも抑制されます。サーバーが応答した上での拒否（`ServerError`）は「到達可能」とみなし、ブレーカーを開きません。
+
+```python
 from mygramdb_client import (
-    MygramClient,
-    SearchResponse,
-    TimeoutError,
-    ConnectionError
+    MygramPool, ClientConfig, PoolConfig, CircuitBreakerConfig, CircuitOpenError,
 )
 
-async def search_with_retry(
-    client: MygramClient,
-    table: str,
-    query: str,
-    max_retries: int = 3,
-    retry_delay: float = 1.0
-) -> SearchResponse:
-    last_error = None
+pool = MygramPool(
+    ClientConfig(host='localhost'),
+    PoolConfig(
+        max_connections=10,
+        circuit_breaker=CircuitBreakerConfig(failure_threshold=5, reset_timeout=10.0),
+    ),
+)
+await pool.open()
 
-    for attempt in range(1, max_retries + 1):
-        try:
-            return await client.search(table, query)
-        except (TimeoutError, ConnectionError) as e:
-            last_error = e
+try:
+    result = await pool.search('articles', 'test')
+except CircuitOpenError:
+    # ダウン中のサーバーを叩き続けず、縮退したレスポンスを返す
+    ...
+```
 
-            if attempt < max_retries:
-                print(f"試行 {attempt} 失敗、{retry_delay} 秒後にリトライ...")
-                await asyncio.sleep(retry_delay)
+## 観測性
 
-                # 接続が切れた場合は再接続
-                if isinstance(e, ConnectionError) and not client.is_connected():
-                    await client.connect()
+プールに `on_event` コールバックを登録すると、任意のバックエンドへメトリクスを流せます（特定のメトリクスライブラリには依存しません）。コールバックは同期関数で、例外は握りつぶされるため、計測がプール動作を妨げることはありません。加えて `pool.stats()` で `PoolStats` スナップショットを取得できます。
 
-                continue
+```python
+from mygramdb_client import MygramPool, ClientConfig, PoolConfig, PoolEvent
 
-            raise
+def on_event(event: PoolEvent, payload: dict) -> None:
+    if event is PoolEvent.ACQUIRE:
+        record_wait(payload["wait_seconds"])
+    elif event is PoolEvent.RETRY:
+        count_retry(payload["attempt"])
+    elif event is PoolEvent.BREAKER_STATE_CHANGE:
+        log_breaker(payload["state"])
 
-    raise last_error
+pool = MygramPool(ClientConfig(host='localhost'), PoolConfig(on_event=on_event))
+await pool.open()
 
-
-# 使用例
-results = await search_with_retry(client, 'articles', 'test', max_retries=3)
+# プール状態のスナップショット
+stats = pool.stats()
+print(stats.total_connections, stats.in_use, stats.pending_waiters)
 ```
 
 ## クエリパフォーマンス監視
@@ -315,6 +302,9 @@ class PerformanceMonitor:
             'max_ms': stats.max_ms,
         }
 
+    def get_all_stats(self) -> Dict[str, dict]:
+        return {q: self.get_stats(q) for q in self.stats}
+
     def reset(self) -> None:
         self.stats.clear()
 
@@ -371,6 +361,11 @@ class CachedMygramClient:
 
     def clear_cache(self) -> None:
         self.cache.clear()
+
+    def get_cache_stats(self) -> dict:
+        return {
+            'entries': len(self.cache),
+        }
 
 
 # 使用例
@@ -448,10 +443,10 @@ print(f"合計 {len(all_results)} 件取得")
 
 ```python
 # 良い例
-pool = MygramPool(config, pool_size=10)
-await pool.init()
+pool = MygramPool(config, PoolConfig(max_connections=10))
+await pool.open()
 
-# 悪い例 - リクエストごとに新しい接続を作成
+# 悪い例 - 単一クライアントは全リクエストを 1 本の接続で直列化する
 client = MygramClient(config)
 await client.connect()
 ```
@@ -473,6 +468,11 @@ except ConnectionError:
 results = await client.search('articles', 'test')
 ```
 
+`ConnectionError` と `TimeoutError` は組み込みの `ConnectionError` /
+`TimeoutError`（いずれも `OSError`）も継承しているため、ライブラリ名を
+インポートしても組み込みを使っても、上記のハンドラで捕捉できます。
+Python 3.11+ では `except asyncio.TimeoutError` でも `TimeoutError` を捕捉できます。
+
 ### 3. 適切なタイムアウトを設定する
 
 ```python
@@ -484,6 +484,13 @@ client = MygramClient(ClientConfig(timeout=0.1))
 
 # 悪い例 - 長すぎる
 client = MygramClient(ClientConfig(timeout=60.0))
+```
+
+接続確立は速く打ち切りたいが重いクエリには猶予を与えたい場合、接続用と読み取り用のタイムアウトを分離できます。
+
+```python
+# 接続失敗は素早く打ち切り、重いクエリには時間を与える
+client = MygramClient(ClientConfig(connect_timeout=0.5, command_timeout=10.0))
 ```
 
 ### 4. パフォーマンスを監視する

@@ -242,14 +242,18 @@ class TestSearchWithHighlights:
 
 
 class TestSearchRaw:
-    def test_quotes_boolean_expression_as_single_token(self):
+    def test_sends_boolean_expression_verbatim(self):
+        # MygramDB v1.8+: the expression is sent unquoted so the server can
+        # tokenize AND/OR/NOT and grouping instead of treating a quoted phrase
+        # as a literal.
         commands, _ = _run_capturing(
             lambda c: c.search_raw(
                 "articles", "python OR (ruby AND rails)", SearchRawOptions(limit=50)
             )
         )
         cmd = commands[0]
-        assert 'SEARCH articles "python OR (ruby AND rails)"' in cmd
+        assert "SEARCH articles python OR (ruby AND rails)" in cmd
+        assert '"python OR (ruby AND rails)"' not in cmd
         assert cmd.rstrip().endswith("LIMIT 50")
 
     def test_emits_bare_offset_when_only_offset_set(self):

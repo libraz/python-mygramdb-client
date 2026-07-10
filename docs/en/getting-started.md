@@ -202,9 +202,15 @@ async def debug_example():
 |--------|------|---------|-------------|
 | `host` | str | "127.0.0.1" | Server hostname |
 | `port` | int | 11016 | Server port |
-| `timeout` | float | 5.0 | Connection and read timeout in seconds |
+| `socket_path` | str | "" | Unix socket path; overrides host/port when set |
+| `timeout` | float | 5.0 | Default timeout (seconds) for connect and per-command reads |
+| `connect_timeout` | Optional[float] | None | Connection deadline; falls back to `timeout` |
+| `command_timeout` | Optional[float] | None | Per-response read deadline; falls back to `timeout` |
 | `recv_buffer_size` | int | 65536 | Receive buffer size in bytes |
 | `max_query_length` | int | 128 | Maximum query expression length |
+| `auto_reconnect` | bool | False | Reconnect+resend when the socket died before the write |
+| `tcp_keepalive` | bool | True | Enable `SO_KEEPALIVE` on TCP connections |
+| `tcp_keepalive_idle` | int | 60 | Idle seconds before the first keepalive probe |
 
 ## Error Handling
 
@@ -237,6 +243,22 @@ async def error_handling_example():
     finally:
         await client.disconnect()
 ```
+
+## MygramDB v1.8 Notes
+
+Two wire-protocol behaviors matter when targeting a MygramDB v1.8 server:
+
+- **Verbatim boolean transport.** `search_raw()` sends its expression unquoted,
+  so the server parses `AND` / `OR` / `NOT` and parenthesized grouping —
+  including OR groups nested under AND. Build the expression with
+  `convert_search_expression()`; control characters are still rejected before
+  the query is sent, so the unquoted transport stays injection-safe.
+- **FACET `#` values.** A `facet()` value that starts with `#` is preserved:
+  only tab-less `#` lines in the FACET response are treated as comments, so a
+  legitimate `#tag`-style value (which carries a tab before its count) is kept.
+
+MygramDB v1.7 (multi-database, `search_raw`, runtime variables, on-demand sync)
+and v1.6 (fuzzy search, highlight, facets, BM25) remain supported.
 
 ## Next Steps
 

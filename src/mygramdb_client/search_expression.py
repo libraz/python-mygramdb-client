@@ -306,9 +306,9 @@ def convert_search_expression(expression: str) -> str:
     and to_query_string() in one call.
 
     Examples:
-    - `+golang tutorial` -> `golang AND (tutorial)`
+    - `+golang tutorial` -> `golang AND tutorial`
     - `+golang -old` -> `golang AND NOT old`
-    - `python OR ruby` -> `python OR ruby`
+    - `python OR ruby` -> `python OR ruby`  (complex expression returned as-is)
 
     Args:
         expression: Web-style search expression.

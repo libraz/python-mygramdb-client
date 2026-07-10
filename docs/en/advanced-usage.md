@@ -4,80 +4,51 @@ This guide covers advanced usage patterns and best practices for mygramdb-client
 
 ## Connection Pooling
 
-For high-performance applications, implement connection pooling to reuse connections:
+A single `MygramClient` owns one connection and serializes every command on it,
+so a lone client cannot exceed one in-flight request. For high throughput
+(hundreds of requests per second), use the built-in `MygramPool`, which
+multiplexes concurrent requests over several connections, validates a
+connection before hand-out, and transparently replaces one that has died.
 
 ```python
-import asyncio
-from typing import List, Callable, Awaitable
-from mygramdb_client import MygramClient, ClientConfig
+from mygramdb_client import MygramClient, MygramPool, ClientConfig, PoolConfig
 
-class MygramPool:
-    def __init__(self, config: ClientConfig, pool_size: int = 10):
-        self.config = config
-        self.pool_size = pool_size
-        self.clients: List[MygramClient] = []
-        self.available: List[MygramClient] = []
-        self.pending: List[Callable[[MygramClient], None]] = []
-        self._lock = asyncio.Lock()
-
-    async def init(self) -> None:
-        for _ in range(self.pool_size):
-            client = MygramClient(self.config)
-            await client.connect()
-            self.clients.append(client)
-            self.available.append(client)
-
-    async def acquire(self) -> MygramClient:
-        async with self._lock:
-            if self.available:
-                return self.available.pop()
-
-        # Wait for a client to become available
-        future: asyncio.Future[MygramClient] = asyncio.Future()
-        self.pending.append(lambda c: future.set_result(c))
-        return await future
-
-    async def release(self, client: MygramClient) -> None:
-        async with self._lock:
-            if self.pending:
-                callback = self.pending.pop(0)
-                callback(client)
-            else:
-                self.available.append(client)
-
-    async def close(self) -> None:
-        for client in self.clients:
-            await client.disconnect()
-        self.clients.clear()
-        self.available.clear()
-
-    def get_stats(self) -> dict:
-        return {
-            'total': len(self.clients),
-            'available': len(self.available),
-            'in_use': len(self.clients) - len(self.available),
-            'pending': len(self.pending),
-        }
-
-
-# Usage
 async def main():
     pool = MygramPool(
         ClientConfig(host='localhost', port=11016),
-        pool_size=10
+        PoolConfig(min_connections=2, max_connections=10, acquire_timeout=5.0),
     )
-    await pool.init()
-
-    client = await pool.acquire()
+    await pool.open()  # pre-open min_connections
     try:
-        results = await client.search('articles', 'test')
-        print(results)
-    finally:
-        await pool.release(client)
+        # Delegation API: acquire -> run -> release in one call.
+        result = await pool.search('articles', 'test')
+        print(result.total_count)
 
-    print(pool.get_stats())
-    await pool.close()
+        # Or check out a connection explicitly.
+        async with pool.acquire() as client:
+            result = await client.search('articles', 'test')
+            print(result.total_count)
+
+        print(pool.stats())
+    finally:
+        await pool.close()
 ```
+
+`MygramPool` is also an async context manager, so `open()`/`close()` can be
+handled automatically:
+
+```python
+async with MygramPool(ClientConfig(host='localhost')) as pool:
+    result = await pool.search('articles', 'test')
+```
+
+The effective request concurrency is bounded by `max_connections`. When the
+pool is saturated, `acquire()` waits up to `acquire_timeout` and then raises
+`PoolTimeoutError`; set `max_pending` to cap the waiter queue and fail fast
+with `PoolExhaustedError` instead of queueing without bound.
+
+> Pooled connections are managed with `auto_reconnect` enabled, so a connection
+> that drops between uses heals itself on the next command.
 
 ## Context Manager Pattern
 
@@ -135,7 +106,8 @@ async def main():
 
 ## Parallel Processing with Pool
 
-Combine connection pooling with parallel processing:
+Fan out concurrent queries; the pool caps concurrency at `max_connections` and
+serves each call on its own connection:
 
 ```python
 async def parallel_search(
@@ -143,14 +115,9 @@ async def parallel_search(
     table: str,
     queries: List[str]
 ) -> List[SearchResponse]:
-    async def search_one(query: str) -> SearchResponse:
-        client = await pool.acquire()
-        try:
-            return await client.search(table, query)
-        finally:
-            await pool.release(client)
-
-    return await asyncio.gather(*[search_one(q) for q in queries])
+    return await asyncio.gather(*[
+        pool.search(table, query) for query in queries
+    ])
 
 
 # Usage
@@ -213,49 +180,95 @@ async def main():
 
 ## Retry Logic
 
-Implement automatic retry for transient failures:
+Attach a `RetryPolicy` to the pool to retry transient failures on the pool's
+read-only delegation API (`search` / `count` / `get` / `facet` / `info`). It
+uses exponential backoff with full jitter and only retries connection/timeout
+errors — server rejections (`ServerError`), input errors
+(`InputValidationError`) and framing errors (`ProtocolError`) are not retried,
+since resending cannot change the outcome.
 
 ```python
-import asyncio
+from mygramdb_client import MygramPool, ClientConfig, PoolConfig, RetryPolicy
+
+pool = MygramPool(
+    ClientConfig(host='localhost'),
+    PoolConfig(
+        max_connections=10,
+        retry_policy=RetryPolicy(max_attempts=3, base_delay=0.05, max_delay=1.0),
+    ),
+)
+await pool.open()
+
+# Retries are applied transparently.
+result = await pool.search('articles', 'test')
+```
+
+For a bare `MygramClient`, wrap a re-callable coroutine with the same policy:
+
+```python
+policy = RetryPolicy(max_attempts=3)
+result = await policy.run(lambda: client.search('articles', 'test'))
+```
+
+Commands with side effects (`DUMP`, `OPTIMIZE`, `SYNC`, replication control)
+are not part of the delegation API and are never retried automatically.
+
+## Circuit Breaker
+
+Under a server outage, retrying every request just piles up connect attempts
+and timeouts. Attach a `CircuitBreakerConfig` to the pool to fail fast instead.
+After `failure_threshold` consecutive connect/timeout failures the breaker
+opens and delegation calls raise `CircuitOpenError` without touching the
+network; after `reset_timeout` seconds it allows a single trial and closes
+again on success. The breaker sits outside the retry policy, so an open breaker
+suppresses retries too. Server rejections (`ServerError`) do not trip it — the
+server is still reachable.
+
+```python
 from mygramdb_client import (
-    MygramClient,
-    SearchResponse,
-    TimeoutError,
-    ConnectionError
+    MygramPool, ClientConfig, PoolConfig, CircuitBreakerConfig, CircuitOpenError,
 )
 
-async def search_with_retry(
-    client: MygramClient,
-    table: str,
-    query: str,
-    max_retries: int = 3,
-    retry_delay: float = 1.0
-) -> SearchResponse:
-    last_error = None
+pool = MygramPool(
+    ClientConfig(host='localhost'),
+    PoolConfig(
+        max_connections=10,
+        circuit_breaker=CircuitBreakerConfig(failure_threshold=5, reset_timeout=10.0),
+    ),
+)
+await pool.open()
 
-    for attempt in range(1, max_retries + 1):
-        try:
-            return await client.search(table, query)
-        except (TimeoutError, ConnectionError) as e:
-            last_error = e
+try:
+    result = await pool.search('articles', 'test')
+except CircuitOpenError:
+    # Serve a degraded response instead of hammering a downed server.
+    ...
+```
 
-            if attempt < max_retries:
-                print(f"Attempt {attempt} failed, retrying in {retry_delay}s...")
-                await asyncio.sleep(retry_delay)
+## Observability
 
-                # Reconnect if connection was lost
-                if isinstance(e, ConnectionError) and not client.is_connected():
-                    await client.connect()
+Register an `on_event` callback on the pool to feed metrics into any backend
+(no dependency on a specific metrics library). Callbacks are synchronous and
+their exceptions are swallowed, so instrumentation cannot disrupt the pool.
+`pool.stats()` additionally returns a `PoolStats` snapshot.
 
-                continue
+```python
+from mygramdb_client import MygramPool, ClientConfig, PoolConfig, PoolEvent
 
-            raise
+def on_event(event: PoolEvent, payload: dict) -> None:
+    if event is PoolEvent.ACQUIRE:
+        record_wait(payload["wait_seconds"])
+    elif event is PoolEvent.RETRY:
+        count_retry(payload["attempt"])
+    elif event is PoolEvent.BREAKER_STATE_CHANGE:
+        log_breaker(payload["state"])
 
-    raise last_error
+pool = MygramPool(ClientConfig(host='localhost'), PoolConfig(on_event=on_event))
+await pool.open()
 
-
-# Usage
-results = await search_with_retry(client, 'articles', 'test', max_retries=3)
+# Snapshot of pool state.
+stats = pool.stats()
+print(stats.total_connections, stats.in_use, stats.pending_waiters)
 ```
 
 ## Query Performance Monitoring
@@ -264,7 +277,7 @@ Track and analyze query performance:
 
 ```python
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, Optional
 from mygramdb_client import MygramClient, SearchResponse
 
@@ -340,7 +353,7 @@ Implement a caching layer for frequently accessed data:
 ```python
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict
 from mygramdb_client import MygramClient, SearchResponse
 
 @dataclass
@@ -400,7 +413,7 @@ Implement pagination for large result sets:
 
 ```python
 from typing import AsyncIterator, List
-from mygramdb_client import MygramClient, SearchResponse, SearchResult
+from mygramdb_client import MygramClient, SearchResponse, SearchResult, SearchOptions
 
 class PaginatedSearch:
     def __init__(
@@ -419,7 +432,6 @@ class PaginatedSearch:
         offset = 0
 
         while True:
-            from mygramdb_client import SearchOptions
             results = await self.client.search(
                 self.table, self.query,
                 SearchOptions(limit=self.page_size, offset=offset)
@@ -457,10 +469,10 @@ print(f"Retrieved {len(all_results)} total results")
 
 ```python
 # Good
-pool = MygramPool(config, pool_size=10)
-await pool.init()
+pool = MygramPool(config, PoolConfig(max_connections=10))
+await pool.open()
 
-# Bad - creates new connection for each request
+# Bad - a single client serializes every request onto one connection
 client = MygramClient(config)
 await client.connect()
 ```
@@ -482,6 +494,11 @@ except ConnectionError:
 results = await client.search('articles', 'test')
 ```
 
+`ConnectionError` and `TimeoutError` also subclass the builtin
+`ConnectionError` / `TimeoutError` (both `OSError`), so the handlers above catch
+them whether you import the library names or use the builtins. On Python 3.11+,
+`except asyncio.TimeoutError` catches `TimeoutError` as well.
+
 ### 3. Use Appropriate Timeouts
 
 ```python
@@ -493,6 +510,14 @@ client = MygramClient(ClientConfig(timeout=0.1))
 
 # Bad - too long
 client = MygramClient(ClientConfig(timeout=60.0))
+```
+
+Split the connect deadline from the per-command read deadline when a fast
+connect must coexist with heavier queries:
+
+```python
+# Fail a connect attempt quickly, but allow a heavy query more time.
+client = MygramClient(ClientConfig(connect_timeout=0.5, command_timeout=10.0))
 ```
 
 ### 4. Monitor Performance

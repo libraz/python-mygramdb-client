@@ -12,3 +12,6 @@ wheels/
 
 # coverage
 .coverage
+
+# internal notes / backups
+backup/

@@ -91,11 +91,13 @@ async def search_raw(
 ) -> SearchResponse
 ```
 
-事前に構築したブール式で検索します（MygramDB v1.7+）。式は単一の引用符付き
-トークンとして送信されるため、サーバーの AST パーサが `AND` / `OR` / `NOT` /
-括弧を解釈できます。`search()` の AND/NOT 分解では表現できない OR / グループ化
-セマンティクスを保持するには、[`convert_search_expression()`](#convert_search_expression)
-と組み合わせて使用します。
+事前に構築したブール式で検索します（MygramDB v1.7+）。式はそのまま（引用符
+なし、MygramDB v1.8+）送信されるため、サーバーの AST パーサがネストした
+`AND` / `OR` / `NOT` / グループ化の構造を解釈できます。引用符で囲むと式全体が
+単一のフレーズに潰れてしまいます。`search()` の AND/NOT 分解では表現できない
+OR / グループ化セマンティクスを保持するには、[`convert_search_expression()`](#convert_search_expression)
+と組み合わせて使用します。制御文字は送信前に拒否されるため、引用符なしの送信でも
+インジェクションに対して安全です。
 
 **パラメータ:**
 - `table` - テーブル名（`database.table` 形式も可）
@@ -145,6 +147,29 @@ async def get(table: str, primary_key: str) -> Document
 - `primary_key` - プライマリキー値
 
 **戻り値:** プライマリキーとフィールドを含む `Document`。
+
+#### facet() (v1.6+)
+
+```python
+async def facet(
+    table: str,
+    column: str,
+    options: Optional[FacetOptions] = None
+) -> FacetResponse
+```
+
+フィルタ列の distinct な値を、値ごとのドキュメント数とともに集計します。
+`options.query` が空の場合はテーブル全体を集計し、指定した場合はマッチする
+ドキュメント（オプションの AND/NOT/FILTER による絞り込みを含む）に集計を
+スコープします。
+
+**パラメータ:**
+- `table` - テーブル名（`database.table` 形式も可）
+- `column` - 集計対象のフィルタ列
+- `options` - オプションの `FacetOptions`（`query`、`and_terms`、`not_terms`、
+  `filters`、`limit`）
+
+**戻り値:** ファセット値とカウントを含む `FacetResponse`。
 
 #### info()
 
@@ -266,6 +291,178 @@ async def sync_stop(table: Optional[str] = None) -> str
 実行中の同期を停止します。テーブルを指定しない場合はすべての実行中の同期を、
 指定した場合はそのテーブルの同期のみを停止します。
 
+#### optimize()
+
+```python
+async def optimize(table: Optional[str] = None) -> None
+```
+
+1 つのテーブル、または `table` が `None` の場合はすべてのテーブルのインデックスを
+再構築します。
+
+#### dump_save()
+
+```python
+async def dump_save(filepath: str) -> str
+```
+
+インデックスのスナップショットをサーバー側のファイルに保存します。書き込み先の
+パスを返します。
+
+#### dump_load()
+
+```python
+async def dump_load(filepath: str) -> None
+```
+
+サーバー側のダンプファイルからインデックスをロードします。
+
+#### dump_status()
+
+```python
+async def dump_status() -> DumpStatus
+```
+
+実行中または直近のダンプの保存／ロードの状態を返します。
+
+**戻り値:** `DumpStatus` スナップショット。
+
+#### dump_verify()
+
+```python
+async def dump_verify(filepath: str) -> str
+```
+
+ダンプファイルの整合性を検証します。生の検証レスポンスを返します。
+
+#### dump_info()
+
+```python
+async def dump_info(filepath: str) -> str
+```
+
+ダンプファイルのメタデータを生のレスポンス文字列として返します。
+
+#### cache_stats()
+
+```python
+async def cache_stats() -> CacheStats
+```
+
+クエリキャッシュの統計情報を返します。
+
+**戻り値:** ヒット／ミスのカウンタとメモリ使用量を含む `CacheStats`。
+
+#### cache_clear()
+
+```python
+async def cache_clear(table: Optional[str] = None) -> None
+```
+
+1 つのテーブル、または `table` が `None` の場合はすべてのクエリキャッシュを
+クリアします。
+
+#### cache_enable()
+
+```python
+async def cache_enable() -> None
+```
+
+クエリキャッシュを有効にします。
+
+#### cache_disable()
+
+```python
+async def cache_disable() -> None
+```
+
+クエリキャッシュを無効にします。
+
+---
+
+## MygramPool
+
+高スループット用途向けの `MygramClient` 接続プールです。プール内の各接続は
+自身のコマンドを引き続き直列化するため、実効的な同時実行数は
+`PoolConfig.max_connections` で制限されます。プール接続では常に
+`auto_reconnect` が有効になります。
+
+### コンストラクタ
+
+```python
+MygramPool(
+    config: Optional[ClientConfig] = None,
+    pool_config: Optional[PoolConfig] = None,
+)
+```
+
+### メソッド
+
+#### open()
+
+```python
+async def open() -> None
+```
+
+`PoolConfig.min_connections` 個の接続を事前に開きます。`async with pool:` から
+も呼び出されます。
+
+#### close()
+
+```python
+async def close() -> None
+```
+
+プールをクローズし、所有するすべての接続を切断します。
+
+#### acquire()
+
+```python
+def acquire() -> PooledConnection
+```
+
+チェックアウトした `MygramClient` を返す非同期コンテキストマネージャを返します。
+接続は終了時にプールへ返却されます。
+
+```python
+async with pool.acquire() as client:
+    result = await client.search('articles', 'hello')
+```
+
+**発生する例外:**
+- `PoolTimeoutError` - `acquire_timeout` 内に接続が空かなかった場合
+- `PoolExhaustedError` - 待機キューがすでに `max_pending` に達している場合
+- `PoolClosedError` - プールがクローズされている場合
+
+#### 委譲 API
+
+```python
+async def search(table, query, options=None) -> SearchResponse
+async def search_raw(table, raw_query, options=None) -> SearchResponse
+async def count(table, query, options=None) -> CountResponse
+async def get(table, primary_key) -> Document
+async def facet(table, column, options=None) -> FacetResponse
+async def info() -> ServerInfo
+```
+
+接続を取得し、コマンドを実行し、返却する読み取り専用の便利メソッドです。
+`PoolConfig.retry_policy` と `PoolConfig.circuit_breaker` が適用されます。
+状態を伴う操作（レプリケーション、同期、`set_variable` など）には
+`acquire()` で明示的に接続を取得してください。
+
+#### stats()
+
+```python
+def stats() -> PoolStats
+```
+
+その時点の `PoolStats` スナップショットを返します。
+
+### PooledConnection
+
+`MygramPool.acquire()` が返す非同期コンテキストマネージャです。開始時に内部の
+`MygramClient` を返し、終了時にプールへ返却します。
+
 ---
 
 ## 型
@@ -277,10 +474,20 @@ async def sync_stop(table: Optional[str] = None) -> str
 class ClientConfig:
     host: str = "127.0.0.1"
     port: int = 11016
-    timeout: float = 5.0
+    socket_path: str = ""                     # Unix ソケットパス（指定時は host/port より優先）
+    timeout: float = 5.0                      # connect/command タイムアウトのフォールバック
+    connect_timeout: Optional[float] = None   # 接続のデッドライン（None なら timeout）
+    command_timeout: Optional[float] = None   # レスポンス読み取りのデッドライン（None なら timeout）
     recv_buffer_size: int = 65536
     max_query_length: int = 128
+    auto_reconnect: bool = False              # 書き込み前に切断を検出したら再接続＋再送
+    tcp_keepalive: bool = True                # TCP 接続で SO_KEEPALIVE を有効化
+    tcp_keepalive_idle: int = 60              # 最初のキープアライブ探索までのアイドル秒数
 ```
+
+`auto_reconnect` はリクエストの書き込み *前* に切断を検出した場合のみ再送します。
+書き込み *後* の切断は再送せずに `ConnectionError` として通知するため、すでに
+適用された可能性のあるコマンドが暗黙的に繰り返されることはありません。
 
 ### SearchOptions
 
@@ -292,9 +499,24 @@ class SearchOptions:
     and_terms: List[str] = field(default_factory=list)
     not_terms: List[str] = field(default_factory=list)
     filters: Dict[str, str] = field(default_factory=dict)
-    sort_column: Optional[str] = None
+    sort_column: Optional[str] = None             # BM25 相関には "_score"（v1.6+）。None はプライマリキー
     sort_desc: bool = True
+    fuzzy: int = 0                                # レーベンシュタイン距離 0/1/2（v1.6+）
+    highlight: Optional[HighlightOptions] = None  # 設定時に HIGHLIGHT を有効化（v1.6+）
 ```
+
+### HighlightOptions (v1.6+)
+
+```python
+@dataclass
+class HighlightOptions:
+    open_tag: str = ""       # 開始タグ。close_tag と一緒に設定（サーバー既定 <em>）
+    close_tag: str = ""      # 終了タグ。open_tag と一緒に設定（サーバー既定 </em>）
+    snippet_len: int = 0     # スニペットあたりのコードポイント数、1..10000（0 = サーバー既定 100）
+    max_fragments: int = 0   # ドキュメントあたりのフラグメント数、1..100（0 = サーバー既定 3）
+```
+
+空の `HighlightOptions()` はサーバー既定値でハイライトを有効化します。
 
 ### SearchRawOptions (v1.7+)
 
@@ -316,6 +538,18 @@ class CountOptions:
     filters: Dict[str, str] = field(default_factory=dict)
 ```
 
+### FacetOptions (v1.6+)
+
+```python
+@dataclass
+class FacetOptions:
+    query: str = ""                                      # 空ならテーブル全体を集計
+    and_terms: List[str] = field(default_factory=list)
+    not_terms: List[str] = field(default_factory=list)
+    filters: Dict[str, str] = field(default_factory=dict)
+    limit: int = 0                                       # ファセット値の最大数（0 は無制限）
+```
+
 ### SearchResponse
 
 ```python
@@ -333,6 +567,7 @@ class SearchResponse:
 class SearchResult:
     primary_key: str
     score: Optional[float] = None
+    snippet: Optional[str] = None   # HIGHLIGHT を要求したときのみ設定（v1.6+）
 ```
 
 ### CountResponse
@@ -342,6 +577,23 @@ class SearchResult:
 class CountResponse:
     count: int
     debug: Optional[DebugInfo] = None
+```
+
+### FacetValue (v1.6+)
+
+```python
+@dataclass
+class FacetValue:
+    value: str
+    count: int
+```
+
+### FacetResponse (v1.6+)
+
+```python
+@dataclass
+class FacetResponse:
+    results: List[FacetValue] = field(default_factory=list)
 ```
 
 ### Document
@@ -375,6 +627,42 @@ class ReplicationStatus:
     running: bool = False
     gtid: str = ""
     status_str: str = ""
+    processed_events: int = 0  # 処理済み binlog イベント総数（複数行レスポンス時）
+    queue_size: int = 0        # 適用キュー内の保留イベント数（複数行レスポンス時）
+```
+
+### DumpStatus
+
+```python
+@dataclass
+class DumpStatus:
+    status: str = ""
+    filepath: str = ""
+    tables_total: int = 0
+    tables_processed: int = 0
+    current_table: str = ""
+    elapsed_seconds: float = 0.0
+    save_in_progress: bool = False
+    load_in_progress: bool = False
+    result_filepath: str = ""
+    error: str = ""
+```
+
+### CacheStats
+
+```python
+@dataclass
+class CacheStats:
+    enabled: bool = False
+    hits: int = 0
+    misses: int = 0
+    hit_rate: float = 0.0
+    current_entries: int = 0
+    memory_bytes: int = 0
+    evictions: int = 0
+    max_memory_mb: float = 0.0
+    current_memory_mb: float = 0.0
+    ttl_seconds: int = 0
 ```
 
 ### DebugInfo
@@ -393,6 +681,10 @@ class DebugInfo:
     after_filters: int = 0
     final: int = 0
     optimization: str = ""
+    sort: Optional[str] = None
+    cache: Optional[str] = None
+    cache_age_ms: Optional[float] = None
+    cache_saved_ms: Optional[float] = None
     limit: Optional[int] = None
     offset: Optional[int] = None
 ```
@@ -405,6 +697,75 @@ class SimplifiedExpression:
     main_term: str
     and_terms: List[str] = field(default_factory=list)
     not_terms: List[str] = field(default_factory=list)
+```
+
+### PoolConfig
+
+```python
+@dataclass
+class PoolConfig:
+    min_connections: int = 1                 # MygramPool.open() で事前に開く数
+    max_connections: int = 10                # 接続数の上限／同時実行の上限
+    acquire_timeout: Optional[float] = 5.0   # 飽和時の待機上限（None は無制限）
+    max_pending: int = 0                     # 待機キューの上限（0 は無制限）
+    max_connection_lifetime: float = 0.0     # N 秒後に接続を再生成（0 で無効）
+    idle_health_check_interval: float = 30.0 # N 秒アイドル後、払い出し前に検証
+    retry_policy: Optional[RetryPolicy] = None            # 委譲 API に適用
+    circuit_breaker: Optional[CircuitBreakerConfig] = None
+    on_event: Optional[Callable[[PoolEvent, Dict[str, Any]], None]] = None
+```
+
+### RetryPolicy
+
+```python
+@dataclass
+class RetryPolicy:
+    max_attempts: int = 3
+    base_delay: float = 0.05
+    max_delay: float = 1.0
+    retryable: Tuple[Type[BaseException], ...] = (TimeoutError, ConnectionError)
+```
+
+フルジッター付きの指数バックオフです。`retryable` に含まれる例外のみリトライ
+され、`ServerError` / `InputValidationError` / `ProtocolError` は再送しても結果が
+変わらないためリトライされません。プールでは読み取り専用の委譲 API にのみ
+適用されます。
+
+### CircuitBreakerConfig
+
+```python
+@dataclass
+class CircuitBreakerConfig:
+    failure_threshold: int = 5   # ブレーカーが開くまでの連続失敗回数
+    reset_timeout: float = 10.0  # ハーフオープン試行までのオープン秒数
+```
+
+### PoolEvent
+
+```python
+class PoolEvent(str, Enum):
+    ACQUIRE = "acquire"                          # {"wait_seconds": float}
+    CONNECTION_DISCARDED = "connection_discarded"
+    RETRY = "retry"                              # {"attempt": int, "error": str}
+    BREAKER_STATE_CHANGE = "breaker_state_change"  # {"state": str}
+```
+
+`PoolConfig.on_event` に配信される観測イベントです。コールバックは同期的で、
+その例外は握りつぶされるため、計装がプールの動作を妨げることはありません。
+
+### PoolStats
+
+```python
+@dataclass
+class PoolStats:
+    total_connections: int = 0
+    available: int = 0
+    in_use: int = 0
+    pending_waiters: int = 0
+    total_acquires: int = 0
+    total_acquire_wait_seconds: float = 0.0
+    dead_connections_discarded: int = 0
+    reconnects: int = 0
 ```
 
 ---
@@ -423,7 +784,9 @@ class MygramError(Exception):
 
 ### ConnectionError
 
-接続に失敗した場合に発生します。
+接続に失敗した場合に発生します。組み込みの `ConnectionError`（`OSError` の
+サブクラス）も継承しているため、呼び出し側が組み込みとこのライブラリの
+どちらのつもりでも `except ConnectionError` で捕捉できます。
 
 ### ProtocolError
 
@@ -431,7 +794,9 @@ class MygramError(Exception):
 
 ### TimeoutError
 
-操作がタイムアウトした場合に発生します。
+操作がタイムアウトした場合に発生します。組み込みの `TimeoutError` も継承して
+います。Python 3.11+ では `asyncio.TimeoutError` と同一クラスのため、
+`except TimeoutError`（組み込み・asyncio いずれも）で捕捉できます。
 
 ### InputValidationError
 
@@ -440,6 +805,25 @@ class MygramError(Exception):
 ### ServerError
 
 サーバーがエラーレスポンスを返した場合に発生します。
+
+### PoolTimeoutError
+
+プール接続の取得が `PoolConfig.acquire_timeout` を超えた場合に発生します。
+`TimeoutError` を継承しているため、既存のタイムアウトハンドラでも捕捉できます。
+
+### PoolExhaustedError
+
+プールの待機キューがすでに `PoolConfig.max_pending` に達しており、新たな
+`acquire()` が待機を要する場合に発生します。
+
+### PoolClosedError
+
+すでにクローズされたプールから取得しようとした場合に発生します。
+
+### CircuitOpenError
+
+サーキットブレーカーがオープン中に、プールの委譲 API がネットワークに触れずに
+発生させます。
 
 ---
 
