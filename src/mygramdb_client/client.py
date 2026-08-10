@@ -1506,6 +1506,11 @@ class MygramClient:
             current_gtid: xxx
             processed_events: 123
             END
+
+        The diagnostics keys a v1.10 server adds (``crc_errors``,
+        ``schema_incompatible``, the ``last_error`` pair and the applied-progress
+        timestamps) are read when present and left at their defaults otherwise,
+        so one parser serves every server version.
         """
         if not response.startswith("OK REPLICATION"):
             raise ProtocolError(f"Invalid REPLICATION STATUS response: {response}")
@@ -1519,6 +1524,13 @@ class MygramClient:
             gtid = ""
             processed_events = 0
             queue_size = 0
+            state = ""
+            crc_errors = 0
+            schema_incompatible = False
+            last_error_code = 0
+            last_error = ""
+            last_applied_unixtime = 0
+            seconds_since_last_applied: Optional[int] = None
 
             for line in lines[1:]:
                 trimmed = line.strip()
@@ -1534,6 +1546,7 @@ class MygramClient:
 
                 if key == "status":
                     running = value == "running"
+                    state = value
                 elif key in ("current_gtid", "gtid"):
                     gtid = value
                 elif key == "processed_events":
@@ -1546,6 +1559,34 @@ class MygramClient:
                         queue_size = int(value)
                     except ValueError:
                         pass
+                elif key == "crc_errors":
+                    try:
+                        crc_errors = int(value)
+                    except ValueError:
+                        pass
+                elif key == "schema_incompatible":
+                    schema_incompatible = value == "true"
+                elif key == "last_error_code":
+                    # The server reports 0 for "no failure recorded", which is
+                    # already this field's default, so it needs no special case.
+                    try:
+                        last_error_code = int(value)
+                    except ValueError:
+                        pass
+                elif key == "last_error":
+                    last_error = value
+                elif key == "last_applied_unixtime":
+                    try:
+                        last_applied_unixtime = int(value)
+                    except ValueError:
+                        pass
+                elif key == "seconds_since_last_applied":
+                    # Passed through verbatim: the server's -1 means "no event
+                    # applied yet", a sentinel rather than a lag of zero.
+                    try:
+                        seconds_since_last_applied = int(value)
+                    except ValueError:
+                        pass
 
             return ReplicationStatus(
                 running=running,
@@ -1553,6 +1594,13 @@ class MygramClient:
                 status_str=response,
                 processed_events=processed_events,
                 queue_size=queue_size,
+                state=state,
+                crc_errors=crc_errors,
+                schema_incompatible=schema_incompatible,
+                last_error_code=last_error_code,
+                last_error=last_error,
+                last_applied_unixtime=last_applied_unixtime,
+                seconds_since_last_applied=seconds_since_last_applied,
             )
 
         # Single-line format: OK REPLICATION status=running gtid=xxx

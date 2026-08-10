@@ -222,7 +222,9 @@ async def get_replication_status() -> ReplicationStatus
 
 Get current replication status.
 
-**Returns:** `ReplicationStatus` with running state and GTID.
+**Returns:** `ReplicationStatus` with running state and GTID, plus the v1.10
+diagnostics (reported state, CRC errors, schema compatibility, the last failure
+and the applied-progress lag).
 
 #### stop_replication()
 
@@ -722,7 +724,27 @@ class ReplicationStatus:
     status_str: str = ""
     processed_events: int = 0  # total binlog events processed (multi-line response)
     queue_size: int = 0        # pending events in the apply queue (multi-line response)
+
+    # Diagnostics (MygramDB v1.10+)
+    state: str = ""                # running | stopped | failed | not_configured
+    crc_errors: int = 0            # binlog events whose checksum did not verify
+    schema_incompatible: bool = False
+    last_error_code: int = 0       # from the ErrorCode table; 0 while none is recorded
+    last_error: str = ""
+    last_applied_unixtime: int = 0
+    seconds_since_last_applied: Optional[int] = None
 ```
+
+`state` separates a reader stopped on request from one stopped on an error,
+which `running` alone cannot express; an unrecognized value is passed through
+rather than dropped. Fields a pre-v1.10 server does not report keep their
+defaults.
+
+`seconds_since_last_applied` is the lag to alert on. It reads `None` when the
+server did not report it, and the server itself sends `-1` while no event has
+been applied — a sentinel, not a lag of zero. Pair it with
+`last_applied_unixtime != 0` to tell a server with no data yet from a genuinely
+current replica.
 
 ### DumpStatus
 

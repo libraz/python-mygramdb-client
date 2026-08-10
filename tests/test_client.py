@@ -15,7 +15,7 @@ from mygramdb_client import (
     SearchResponse,
     ServerInfo,
 )
-from mygramdb_client.errors import ProtocolError
+from mygramdb_client.errors import ErrorCode, ProtocolError
 
 
 class TestClientConfig:
@@ -332,6 +332,103 @@ END"""
     def test_parse_invalid_replication_response_raises_error(self):
         with pytest.raises(ProtocolError, match="Invalid REPLICATION"):
             MygramClient._parse_replication_status_response("INVALID")
+
+    def test_parse_v110_diagnostics_fields(self):
+        response = """OK REPLICATION
+status: running
+current_gtid: xyz789
+processed_events: 100
+queue_size: 2
+crc_errors: 3
+schema_incompatible: false
+last_error_code: 0
+last_error:
+last_applied_unixtime: 1770000000
+seconds_since_last_applied: 4
+END"""
+        result = MygramClient._parse_replication_status_response(response)
+
+        assert result.state == "running"
+        assert result.crc_errors == 3
+        assert result.schema_incompatible is False
+        assert result.last_error_code == 0
+        assert result.last_error == ""
+        assert result.last_applied_unixtime == 1770000000
+        assert result.seconds_since_last_applied == 4
+
+    def test_state_separates_a_failure_from_a_requested_stop(self):
+        # `running` reads False for both, so only `state` tells them apart.
+        stopped = MygramClient._parse_replication_status_response(
+            "OK REPLICATION\nstatus: stopped\nEND"
+        )
+        failed = MygramClient._parse_replication_status_response(
+            "OK REPLICATION\nstatus: failed\nlast_error_code: 2007\n"
+            "last_error: binlog read failed\nEND"
+        )
+
+        assert stopped.running is False
+        assert failed.running is False
+        assert stopped.state == "stopped"
+        assert failed.state == "failed"
+        assert failed.last_error_code == ErrorCode.MYSQL_REPLICATION_ERROR
+        assert failed.last_error == "binlog read failed"
+
+    def test_unrecognized_state_is_passed_through(self):
+        # A state a future server adds stays visible rather than being dropped.
+        result = MygramClient._parse_replication_status_response(
+            "OK REPLICATION\nstatus: catching_up\nEND"
+        )
+
+        assert result.state == "catching_up"
+        assert result.running is False
+
+    def test_schema_incompatible_is_read_as_a_boolean(self):
+        result = MygramClient._parse_replication_status_response(
+            "OK REPLICATION\nstatus: failed\nschema_incompatible: true\nEND"
+        )
+
+        assert result.schema_incompatible is True
+
+    def test_negative_lag_sentinel_is_passed_through(self):
+        # -1 means "no event applied yet", which must not read as a lag of zero.
+        result = MygramClient._parse_replication_status_response(
+            "OK REPLICATION\nstatus: running\n"
+            "last_applied_unixtime: 0\nseconds_since_last_applied: -1\nEND"
+        )
+
+        assert result.seconds_since_last_applied == -1
+        assert result.last_applied_unixtime == 0
+
+    def test_diagnostics_default_when_the_server_omits_them(self):
+        # A pre-v1.10 server reports none of these keys.
+        result = MygramClient._parse_replication_status_response(
+            "OK REPLICATION\nstatus: running\ncurrent_gtid: abc\nEND"
+        )
+
+        assert result.crc_errors == 0
+        assert result.schema_incompatible is False
+        assert result.last_error_code == 0
+        assert result.last_error == ""
+        assert result.last_applied_unixtime == 0
+        # None, not 0: an absent field must not read as a lag of zero.
+        assert result.seconds_since_last_applied is None
+
+    def test_single_line_response_reports_no_state(self):
+        result = MygramClient._parse_replication_status_response(
+            "OK REPLICATION status=running gtid=abc123"
+        )
+
+        assert result.state == ""
+        assert result.seconds_since_last_applied is None
+
+    def test_malformed_numeric_diagnostics_keep_their_default(self):
+        result = MygramClient._parse_replication_status_response(
+            "OK REPLICATION\nstatus: running\ncrc_errors: n/a\n"
+            "seconds_since_last_applied: soon\nEND"
+        )
+
+        assert result.crc_errors == 0
+        assert result.seconds_since_last_applied is None
 
 
 class TestDebugInfoParsing:

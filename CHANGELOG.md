@@ -26,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     covers the ad-hoc case
   - Readiness over TCP: `ServerInfo.data_initialized` and `ServerInfo.ready`,
     read from `INFO`
+  - Replication diagnostics on `ReplicationStatus`: `state` (which separates a
+    reader stopped on request from one stopped on an error), `crc_errors`,
+    `schema_incompatible`, `last_error_code` / `last_error`, and the applied
+    progress pair `last_applied_unixtime` / `seconds_since_last_applied`. The
+    lag field is passed through verbatim, so the server's `-1` stays
+    distinguishable from a lag of zero, and reads `None` when the server does
+    not report it
   - Boolean query mode: `SearchOptions.query_mode = QueryMode.BOOLEAN` sends the
     query verbatim so the server parses `AND`/`OR`/`NOT` and grouping, while
     still applying filters, sorting, fuzzy matching and highlighting — the
@@ -78,9 +85,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `connect()` now performs the `AUTH` handshake under the command lock, and a
   rejected token closes the socket instead of leaving an unauthenticated
   connection that would fail on the first administrative command
-- The docker-compose e2e stack targets MygramDB v1.10: it sets an admin token,
-  narrows the CIDR allow list, and publishes its ports on loopback only — the
-  previous configuration is rejected by v1.10's fail-closed validation
+- The docker-compose e2e stack targets MygramDB v1.10: it supplies an admin
+  token, declares the `enabled` filter with the column's own `tinyint` type,
+  builds the initial snapshot at startup, names the private CIDR ranges a
+  published port can arrive from, and publishes its ports on loopback only —
+  the previous configuration is rejected by v1.10's fail-closed validation
 
 ## [1.3.0] - 2026-07-10
 

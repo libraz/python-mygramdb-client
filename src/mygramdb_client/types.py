@@ -357,6 +357,55 @@ class ReplicationStatus:
     queue_size: int = 0
     """Pending events in the replication apply queue (multi-line response only)."""
 
+    state: str = ""
+    """
+    Reported state — ``running``, ``stopped``, ``failed`` or ``not_configured``
+    (MygramDB v1.10+). It separates a reader that stopped on an error from one
+    stopped on request, which :attr:`running` alone cannot express. An
+    unrecognized value is passed through rather than dropped, so a state a
+    future server adds stays visible. Empty for the single-line response and
+    for a server that omits the field.
+    """
+
+    crc_errors: int = 0
+    """Binlog events whose checksum did not verify (MygramDB v1.10+)."""
+
+    schema_incompatible: bool = False
+    """
+    Whether replication stopped because the MySQL schema no longer matches the
+    configured columns (MygramDB v1.10+).
+    """
+
+    last_error_code: int = 0
+    """
+    Code of the last replication failure (MygramDB v1.10+), drawn from the same
+    space as :class:`~mygramdb_client.errors.ErrorCode`. ``0`` while no failure
+    is recorded; the server clears it once a start succeeds.
+    """
+
+    last_error: str = ""
+    """Message belonging to :attr:`last_error_code`; empty while none is recorded."""
+
+    last_applied_unixtime: int = 0
+    """
+    Unix time at which the last event was applied (MygramDB v1.10+). The server
+    stamps it where the replication position advances, so it tracks applied
+    progress rather than mere connectivity. ``0`` while no event has been
+    applied yet, which is the normal state of a server that has just started.
+    """
+
+    seconds_since_last_applied: Optional[int] = None
+    """
+    Replication lag derived from :attr:`last_applied_unixtime` (MygramDB
+    v1.10+) — the field to alert on.
+
+    ``None`` when the server did not report it. The server itself sends ``-1``
+    while no event has been applied, so a lag threshold must exclude the
+    negative sentinel rather than read it as a lag of zero; pair it with
+    ``last_applied_unixtime != 0`` to tell a server with no data yet from a
+    genuinely current replica.
+    """
+
 
 @dataclass
 class DumpStatus:

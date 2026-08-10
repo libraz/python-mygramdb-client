@@ -221,7 +221,7 @@ async def get_replication_status() -> ReplicationStatus
 
 現在のレプリケーション状態を取得します。
 
-**戻り値:** 実行状態と GTID を含む `ReplicationStatus`。
+**戻り値:** 実行状態と GTID に加え、v1.10 の診断フィールド（報告された状態、CRC エラー、スキーマ整合性、直近の失敗、適用進捗から求めた遅延）を含む `ReplicationStatus`。
 
 #### stop_replication()
 
@@ -724,7 +724,20 @@ class ReplicationStatus:
     status_str: str = ""
     processed_events: int = 0  # 処理済み binlog イベント総数（複数行レスポンス時）
     queue_size: int = 0        # 適用キュー内の保留イベント数（複数行レスポンス時）
+
+    # 診断フィールド（MygramDB v1.10 以降）
+    state: str = ""                # running | stopped | failed | not_configured
+    crc_errors: int = 0            # チェックサム検証に失敗した binlog イベント数
+    schema_incompatible: bool = False
+    last_error_code: int = 0       # ErrorCode と同じ体系。記録がなければ 0
+    last_error: str = ""
+    last_applied_unixtime: int = 0
+    seconds_since_last_applied: Optional[int] = None
 ```
+
+`state` は、要求されて停止したリーダーとエラーで停止したリーダーを区別します。`running` だけでは表現できない差です。未知の値もそのまま渡されるため、将来のサーバーが追加した状態が失われることはありません。v1.10 より前のサーバーが返さないフィールドは既定値のままになります。
+
+`seconds_since_last_applied` は監視対象となる遅延です。サーバーが値を返さなかった場合は `None`、まだ 1 件もイベントを適用していない場合はサーバー自身が `-1` を返します。後者は遅延 0 秒ではなく番兵値なので、`last_applied_unixtime != 0` と組み合わせて「まだデータがないサーバー」と「実際に追いついているレプリカ」を区別してください。
 
 ### DumpStatus
 
