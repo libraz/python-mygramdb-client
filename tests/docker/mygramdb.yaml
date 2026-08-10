@@ -75,6 +75,11 @@ dump:
   interval_sec: 0
 
 api:
+  # Required from v1.10 whenever the TCP listener is not loopback-only and no
+  # Unix socket is configured. This is a throwaway stack whose ports are
+  # published on 127.0.0.1 only; a real deployment must not carry its token in
+  # a committed file.
+  admin_token: "e2e_admin_token"
   tcp:
     bind: "0.0.0.0"
     port: 11016
@@ -84,8 +89,14 @@ api:
     port: 8080
 
 network:
+  # From v1.10 a non-loopback bind with an open CIDR list is rejected while the
+  # configuration is parsed. Docker rewrites a published-port connection's
+  # source to the bridge gateway, so the list has to cover the bridge range as
+  # well as loopback (the container's own health probe). Keeping the published
+  # ports on 127.0.0.1 is what actually confines the stack to this host.
   allow_cidrs:
-    - "0.0.0.0/0"
+    - "127.0.0.1/32"
+    - "172.16.0.0/12"
 
 logging:
   level: "info"

@@ -33,6 +33,9 @@ class FakeMygramServer:
         # Override the raw bytes returned for a SEARCH command (e.g. to inject
         # a multibyte HIGHLIGHT payload).
         self.search_response: Optional[bytes] = None
+        # Admin token expected by AUTH (MygramDB v1.10+). ``None`` accepts any
+        # token, matching a server started without api.admin_token.
+        self.admin_token: Optional[str] = None
         # One-shot: close the connection right after the next response.
         self.close_after_next_response = False
         # One-shot: read the next request then close without responding.
@@ -114,19 +117,30 @@ class FakeMygramServer:
 
     def _respond(self, command: str) -> bytes:
         verb = command.split(" ", 1)[0].upper() if command else ""
+        if verb == "AUTH":
+            token = command.split(" ", 1)[1].strip() if " " in command else ""
+            if len(token) >= 2 and token[0] == '"' and token[-1] == '"':
+                token = token[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+            if self.admin_token is None or token == self.admin_token:
+                return b"OK AUTHENTICATED\r\n"
+            return b"ERROR 7 Authentication failed\r\n"
         if verb == "SEARCH":
             if self.search_response is not None:
                 return self.search_response
             return b"OK RESULTS 1 pk1\r\n"
         if verb == "COUNT":
             return b"OK COUNT 1\r\n"
+        if verb == "FACET":
+            return b"OK FACET 1 3\r\nalpha\t5\r\n\r\n"
         if verb == "GET":
             return b"OK DOC pk1 field=value\r\n"
         if verb == "INFO":
             return (
                 b"OK INFO\r\n"
-                b"version: 1.7.0\r\n"
+                b"version: 1.10.0\r\n"
                 b"uptime_seconds: 10\r\n"
+                b"data_initialized: true\r\n"
+                b"readiness: ready\r\n"
                 b"total_documents: 1\r\n"
                 b"END\r\n"
             )

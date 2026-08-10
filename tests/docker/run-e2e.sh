@@ -15,6 +15,10 @@ COMPOSE=(docker compose -f "${SCRIPT_DIR}/docker-compose.yml")
 
 MYGRAM_PORT="${MYGRAM_PORT:-11016}"
 MYGRAM_HTTP_PORT="${MYGRAM_HTTP_PORT:-18080}"
+# Must match api.admin_token in mygramdb.yaml: from v1.10 the server refuses to
+# start on a non-loopback bind without a token, and gates administrative
+# commands behind AUTH.
+MYGRAM_ADMIN_TOKEN="${MYGRAM_ADMIN_TOKEN:-e2e_admin_token}"
 
 cleanup() {
   if [ "${KEEP_UP:-0}" = "1" ]; then
@@ -27,7 +31,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "==> Starting e2e stack (mygramdb=${MYGRAMDB_VERSION:-1.8.0})"
+echo "==> Starting e2e stack (mygramdb=${MYGRAMDB_VERSION:-1.10.0})"
 MYGRAM_PORT="${MYGRAM_PORT}" MYGRAM_HTTP_PORT="${MYGRAM_HTTP_PORT}" "${COMPOSE[@]}" up -d --wait
 
 # `--wait` already blocks on the healthcheck (/health/ready), which only turns
@@ -50,4 +54,5 @@ done
 echo "==> Running e2e suite"
 cd "${REPO_ROOT}"
 MYGRAM_E2E_SEEDED=1 MYGRAM_HOST=127.0.0.1 MYGRAM_PORT="${MYGRAM_PORT}" \
+  MYGRAM_ADMIN_TOKEN="${MYGRAM_ADMIN_TOKEN}" \
   "${PYTHON:-python}" -m pytest tests/test_e2e.py "$@"

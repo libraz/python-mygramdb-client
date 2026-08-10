@@ -20,15 +20,20 @@ Example usage:
 from .client import MygramClient, create_mygram_client
 from .command_utils import parse_table_identity, qualify_table_identity
 from .errors import (
+    TRANSIENT_ERROR_CODES,
+    AuthenticationError,
     CircuitOpenError,
     ConnectionError,
+    ErrorCode,
     InputValidationError,
     MygramError,
     PoolClosedError,
     PoolExhaustedError,
     PoolTimeoutError,
     ProtocolError,
+    ServerBusyError,
     ServerError,
+    ServerNotReadyError,
     TimeoutError,
 )
 from .pool import MygramPool, PooledConnection
@@ -52,7 +57,10 @@ from .types import (
     FacetOptions,
     FacetResponse,
     FacetValue,
+    FilterCondition,
+    FilterOp,
     HighlightOptions,
+    QueryMode,
     ReplicationStatus,
     SearchOptions,
     PoolConfig,
@@ -66,7 +74,7 @@ from .types import (
     SimplifiedExpression,
 )
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 __all__ = [
     # Client
@@ -87,6 +95,9 @@ __all__ = [
     "CountOptions",
     "HighlightOptions",
     "FacetOptions",
+    "QueryMode",
+    "FilterOp",
+    "FilterCondition",
     # Response types
     "SearchResponse",
     "SearchResult",
@@ -117,6 +128,11 @@ __all__ = [
     "TimeoutError",
     "InputValidationError",
     "ServerError",
+    "AuthenticationError",
+    "ServerNotReadyError",
+    "ServerBusyError",
+    "ErrorCode",
+    "TRANSIENT_ERROR_CODES",
     "PoolTimeoutError",
     "PoolExhaustedError",
     "PoolClosedError",

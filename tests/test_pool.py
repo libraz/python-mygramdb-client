@@ -65,7 +65,7 @@ async def test_delegation_api():
             assert doc.primary_key == "pk1"
 
             info = await pool.info()
-            assert info.version == "1.7.0"
+            assert info.version == "1.10.0"
 
 
 async def test_sequential_reuses_min_connections():

@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-08-10
+
+### Added
+
+- MygramDB v1.10 protocol
+  - Typed error frames: `ERROR` responses carry a numeric code, decoded into
+    `ServerError.error_code` and into the specific subclasses
+    `AuthenticationError` (permission denied), `ServerNotReadyError` (loading /
+    not ready) and `ServerBusyError` (rate limited or table held). The full code
+    table is exposed as `ErrorCode`, with `ServerError.is_transient` and
+    `TRANSIENT_ERROR_CODES` for the states that can clear on their own. An
+    untyped frame from an older server yields a plain `ServerError` with
+    `error_code = None`
+  - Administrative authentication: `ClientConfig.admin_token` issues `AUTH` on
+    connect and on every transparent reconnect, so a reconnected session does
+    not silently lose administrative access. `MygramClient.authenticate()`
+    covers the ad-hoc case
+  - Readiness over TCP: `ServerInfo.data_initialized` and `ServerInfo.ready`,
+    read from `INFO`
+  - Boolean query mode: `SearchOptions.query_mode = QueryMode.BOOLEAN` sends the
+    query verbatim so the server parses `AND`/`OR`/`NOT` and grouping, while
+    still applying filters, sorting, fuzzy matching and highlighting — the
+    combination `search_raw()` cannot express
+  - `ClientConfig.max_response_bytes` caps a single response frame; an
+    overlong reply raises `ProtocolError` and drops the connection
+- MygramDB v1.9 protocol
+  - Facet pagination: `FacetOptions.offset`, and `FacetResponse.total_count`
+    reporting the distinct value count before OFFSET and LIMIT
+  - Comparison filters: `FilterCondition` / `FilterOp` (`=`, `!=`, `>`, `>=`,
+    `<`, `<=`) via `filter_conditions` on `SearchOptions`, `CountOptions` and
+    `FacetOptions`, alongside the existing equality `filters` dict
+- `CacheStats` reports every counter `CACHE STATS` emits — lookup totals,
+  invalidation index/queue memory, accounted memory, TTL expirations, the
+  rejection and staleness breakdowns, invalidation modes, and the average
+  hit/miss latencies with the total time saved. Fields an older server omits
+  keep their defaults
+- `DebugInfo` reports `cache_reason`, `cache_cost_ms`, `cache_key` and
+  `highlight`, which the debug block already carried but the client dropped
+
+### Fixed
+
+- `facet()` no longer prefixes the search text with a `QUERY` token. No such
+  keyword exists, so the server read it as part of the text and the aggregation
+  was scoped to documents matching `QUERY <text>` rather than `<text>`
+- `facet()` emits AND / NOT / FILTER refinements for a whole-table facet as
+  well; they were silently dropped whenever `FacetOptions.query` was empty
+- A literal query, term or filter value spelling a clause keyword (`AND`,
+  `LIMIT`, `OR`, ...) or carrying a parenthesis or backslash is now quoted, so
+  it matches as text instead of opening a clause or a boolean group
+- `SearchOptions(sort_desc=False)` without a `sort_column` emits the
+  `SORT ASC` shorthand; the ascending request was previously dropped and the
+  server's descending primary-key default applied instead
+- Identifiers (table, primary key, sort column, filter key) are rejected when
+  they carry a `"`, `'` or `\`, which would flip the tokenizer's quote/escape
+  state and swallow the rest of the command
+
+### Changed
+
+- `RetryPolicy.retryable` now also covers `ServerNotReadyError` and
+  `ServerBusyError`, so a transient server state is retried from the server's
+  numeric code rather than from a message-text match. Other server rejections
+  remain non-retryable
+- `command_timeout` is one deadline for the whole response instead of a timer
+  restarted by each socket read; a server that trickles bytes can no longer hold
+  a command open indefinitely
+- `COUNT` responses are parsed strictly: a header that is not exactly
+  `OK COUNT <decimal>` raises `ProtocolError` instead of reading a plausible
+  number out of a frame that means something else
+- `connect()` now performs the `AUTH` handshake under the command lock, and a
+  rejected token closes the socket instead of leaving an unauthenticated
+  connection that would fail on the first administrative command
+- The docker-compose e2e stack targets MygramDB v1.10: it sets an admin token,
+  narrows the CIDR allow list, and publishes its ports on loopback only — the
+  previous configuration is rejected by v1.10's fail-closed validation
+
 ## [1.3.0] - 2026-07-10
 
 ### Added

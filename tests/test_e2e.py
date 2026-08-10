@@ -32,6 +32,7 @@ _OPTIONAL_FEATURE_ERRORS = (ProtocolError, ServerError)
 
 TEST_HOST = os.environ.get("MYGRAM_HOST", "127.0.0.1")
 TEST_PORT = int(os.environ.get("MYGRAM_PORT", "11016"))
+TEST_ADMIN_TOKEN = os.environ.get("MYGRAM_ADMIN_TOKEN", "")
 
 # Set to "1" by tests/docker/run-e2e.sh, which boots a server seeded with the
 # fixed dataset in tests/docker/mysql-init. Only then can we assert exact result
@@ -39,9 +40,26 @@ TEST_PORT = int(os.environ.get("MYGRAM_PORT", "11016"))
 SEEDED = os.environ.get("MYGRAM_E2E_SEEDED") == "1"
 
 
+def e2e_config(**overrides) -> ClientConfig:
+    """
+    Build a client config pointed at the e2e server.
+
+    ``MYGRAM_ADMIN_TOKEN`` is forwarded as ``admin_token`` so the client
+    authenticates on connect: from MygramDB v1.10 a server whose TCP listener
+    is not loopback-only requires ``AUTH`` before any administrative command.
+    An empty value (a server started without a token) sends no AUTH at all.
+    """
+    return ClientConfig(
+        host=TEST_HOST,
+        port=TEST_PORT,
+        admin_token=TEST_ADMIN_TOKEN,
+        **overrides,
+    )
+
+
 async def is_server_available() -> bool:
     """Check if the MygramDB server is available."""
-    client = MygramClient(ClientConfig(host=TEST_HOST, port=TEST_PORT, timeout=1.0))
+    client = MygramClient(e2e_config(timeout=1.0))
     try:
         await client.connect()
         await client.disconnect()
@@ -53,7 +71,7 @@ async def is_server_available() -> bool:
 @pytest.fixture
 async def client():
     """Create a connected client for tests."""
-    client = MygramClient(ClientConfig(host=TEST_HOST, port=TEST_PORT, timeout=5.0))
+    client = MygramClient(e2e_config(timeout=5.0))
     await client.connect()
     yield client
     await client.disconnect()
@@ -84,7 +102,7 @@ class TestConnection:
         assert client.is_connected() is True
 
     async def test_disconnect_successfully(self):
-        client = MygramClient(ClientConfig(host=TEST_HOST, port=TEST_PORT))
+        client = MygramClient(e2e_config())
         await client.connect()
         assert client.is_connected() is True
 
@@ -428,14 +446,15 @@ class TestOptimize:
         # No exception means success
 
 
-class TestV16Features:
+class TestSearchOptions:
     """
-    End-to-end tests for MygramDB v1.6 features.
+    Round-trip tests for the typed search options: FUZZY, HIGHLIGHT and
+    relevance ordering.
 
-    Some features require specific server configuration (e.g. HIGHLIGHT/
-    _score require ``memory.verify_text: ascii|all``). Tests wrap optional
-    features in try/except ``_OPTIONAL_FEATURE_ERRORS`` (ProtocolError or
-    ServerError) so they pass even if the server is running with defaults.
+    Some of these require specific server configuration (HIGHLIGHT and
+    ``_score`` need ``memory.verify_text: ascii|all``), so they wrap the call
+    in try/except ``_OPTIONAL_FEATURE_ERRORS`` (ProtocolError or ServerError)
+    and skip rather than fail against a server running with defaults.
     """
 
     async def test_fuzzy_distance_one(self, client):
@@ -519,6 +538,10 @@ class TestV16Features:
         assert result is not None
         assert isinstance(result.total_count, int)
 
+
+class TestFacet:
+    """FACET aggregation against whichever columns the server has configured."""
+
     async def test_facet_no_query(self, client):
         info = await client.info()
         if not info.tables:
@@ -556,31 +579,21 @@ class TestAsyncContextManagerE2E:
     """Async context manager E2E tests."""
 
     async def test_context_manager_connect_and_disconnect(self):
-        async with MygramClient(ClientConfig(
-            host=TEST_HOST, port=TEST_PORT, timeout=5.0
-        )) as client:
+        async with MygramClient(e2e_config(timeout=5.0)) as client:
             assert client.is_connected() is True
             info = await client.info()
             assert info is not None
 
     async def test_context_manager_disconnects_after_exit(self):
-        client = MygramClient(ClientConfig(
-            host=TEST_HOST, port=TEST_PORT, timeout=5.0
-        ))
+        client = MygramClient(e2e_config(timeout=5.0))
         async with client:
             assert client.is_connected() is True
 
         assert client.is_connected() is False
 
 
-class TestV17Features:
-    """
-    Version-agnostic round-trip tests for MygramDB v1.7 features.
-
-    These run against any reachable server (no seed required); they assert that
-    each new command frames and parses cleanly, tolerating server rejections
-    (immutable variables, missing table) as long as the protocol round-trips.
-    """
+class TestTableIdentity:
+    """A database-qualified identity addresses the same table as a bare name."""
 
     async def test_database_qualified_identity_matches_bare(self, client):
         info = await client.info()
@@ -595,6 +608,15 @@ class TestV17Features:
         via_bare = await client.search(bare, "test", SearchOptions(limit=5))
 
         assert via_reported.total_count == via_bare.total_count
+
+
+class TestSearchRaw:
+    """
+    Unquoted boolean transport against a live server.
+
+    Against an arbitrary dataset only framing and parsing can be asserted, so
+    these check that each expression shape round-trips cleanly.
+    """
 
     async def test_search_raw_boolean_or(self, client):
         info = await client.info()
@@ -621,6 +643,22 @@ class TestV17Features:
 
         assert isinstance(result.total_count, int)
 
+    async def test_search_raw_or_group_nested_under_and(self, client):
+        info = await client.info()
+        if not info.tables:
+            pytest.skip("No tables available")
+
+        table = info.tables[0]
+        result = await client.search_raw(
+            table, "(hello OR world) AND test", SearchRawOptions(limit=5)
+        )
+        assert isinstance(result.total_count, int)
+        assert isinstance(result.results, list)
+
+
+class TestRuntimeVariables:
+    """SET / SHOW VARIABLES round-trip, tolerating an immutable-variable build."""
+
     async def test_runtime_variables_round_trip(self, client):
         # Some builds mark all variables immutable; tolerate a server rejection
         # as long as the protocol round-trips cleanly.
@@ -631,6 +669,10 @@ class TestV17Features:
         variables = await client.show_variables("logging%")
         assert isinstance(variables, str)
         assert len(variables) > 0
+
+
+class TestSync:
+    """On-demand sync commands frame and parse against a live server."""
 
     async def test_sync_status_round_trip(self, client):
         status = await client.sync_status()
@@ -647,30 +689,12 @@ class TestV17Features:
             pass
 
 
-class TestV18Features:
-    """
-    Version-agnostic round-trip tests for MygramDB v1.8 client alignment:
-    unquoted boolean transport (OR groups nested under AND) and the connection
-    pool driven against a live server.
-    """
-
-    async def test_search_raw_or_group_nested_under_and(self, client):
-        info = await client.info()
-        if not info.tables:
-            pytest.skip("No tables available")
-
-        table = info.tables[0]
-        # Exercises the unquoted-transport parse path; against an arbitrary
-        # server we only assert it frames and parses cleanly.
-        result = await client.search_raw(
-            table, "(hello OR world) AND test", SearchRawOptions(limit=5)
-        )
-        assert isinstance(result.total_count, int)
-        assert isinstance(result.results, list)
+class TestPool:
+    """The connection pool driven against a live server."""
 
     async def test_pool_delegation_round_trip(self):
         pool = MygramPool(
-            ClientConfig(host=TEST_HOST, port=TEST_PORT),
+            e2e_config(),
             PoolConfig(min_connections=1, max_connections=3),
         )
         await pool.open()
@@ -690,7 +714,7 @@ class TestV18Features:
 
     async def test_pool_concurrent_requests(self):
         pool = MygramPool(
-            ClientConfig(host=TEST_HOST, port=TEST_PORT),
+            e2e_config(),
             PoolConfig(
                 min_connections=2,
                 max_connections=4,
@@ -789,7 +813,7 @@ class TestSeededDataset:
 
     async def test_pool_search_matches_direct_client(self):
         pool = MygramPool(
-            ClientConfig(host=TEST_HOST, port=TEST_PORT),
+            e2e_config(),
             PoolConfig(min_connections=2, max_connections=4),
         )
         await pool.open()

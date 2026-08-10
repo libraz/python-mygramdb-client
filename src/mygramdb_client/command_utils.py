@@ -3,7 +3,7 @@ import re
 from typing import Dict, List, Optional
 
 from .errors import InputValidationError
-from .types import HighlightOptions
+from .types import FilterCondition, FilterOp, HighlightOptions
 
 # Control characters: 0x00-0x1F and 0x7F
 CONTROL_CHAR_PATTERN = re.compile(r'[\x00-\x1f\x7f]')
@@ -11,8 +11,27 @@ CONTROL_CHAR_PATTERN = re.compile(r'[\x00-\x1f\x7f]')
 # Whitespace characters that would split an unquoted identifier into multiple tokens
 _IDENTIFIER_WHITESPACE = (" ", "\t", "\n", "\r", "\v", "\f")
 
-# Characters that force a query/value to be quoted on the wire
+# Characters that would end an unquoted identifier's token or change the
+# tokenizer's quote/escape state, so they cannot appear in a bare identifier
+_IDENTIFIER_DELIMITERS = ('"', "'", "\\")
+
+# Characters that force a value to be quoted on the wire
 _QUOTE_TRIGGER_CHARS = frozenset({" ", "\t", "\n", "\r", '"', "'"})
+
+# Command arguments are quoted on a lone backslash as well, since it is the
+# tokenizer's escape character.
+_COMMAND_QUOTE_TRIGGER_CHARS = _QUOTE_TRIGGER_CHARS | {"\\"}
+
+# A query token also carries the expression parser's grouping syntax, so a
+# parenthesis (and the escape character) forces quoting there too.
+_QUERY_QUOTE_TRIGGER_CHARS = _COMMAND_QUOTE_TRIGGER_CHARS | {"(", ")"}
+
+# Words the server reads as the start of a clause. A literal query term equal
+# to one of them is quoted so it matches as text instead of opening a clause.
+_CLAUSE_KEYWORDS = frozenset({
+    "AND", "OR", "NOT", "FILTER", "SORT", "LIMIT", "OFFSET",
+    "HIGHLIGHT", "FUZZY", "FACET", "ORDER",
+})
 
 # Maximum byte length for HIGHLIGHT open_tag / close_tag values. Mirrors the
 # server-side cap (kMaxHighlightTagLength) introduced to prevent response-size
@@ -30,14 +49,16 @@ def validate_identifier(value: str, field_name: str) -> None:
     Validate an unquoted identifier (table, primary key, sort column, filter key).
 
     Identifiers are sent on the wire without quoting; embedded whitespace would
-    split them into multiple tokens and corrupt the protocol.
+    split them into multiple tokens, and a quote or backslash would flip the
+    tokenizer's quote/escape state, corrupting the rest of the command.
 
     Args:
         value: Identifier value.
         field_name: Human-readable field name for error messages.
 
     Raises:
-        InputValidationError: If value is empty or contains whitespace/control chars.
+        InputValidationError: If value is empty or contains whitespace,
+            control characters, or a ``"`` / ``'`` / ``\\`` delimiter.
     """
     if value == "":
         raise InputValidationError(f"Input for {field_name} is empty")
@@ -53,29 +74,35 @@ def validate_identifier(value: str, field_name: str) -> None:
                 f"Input for {field_name} contains whitespace, "
                 "which is not allowed in identifiers"
             )
+        if ch in _IDENTIFIER_DELIMITERS:
+            raise InputValidationError(
+                f"Input for {field_name} contains protocol delimiter "
+                f"'{ch}', which is not allowed in identifiers"
+            )
 
 
-def _quote_token_if_needed(value: str, quote_on_backslash: bool) -> str:
+def _quote_token_if_needed(
+    value: str,
+    trigger_chars: frozenset,
+    quote_clause_keywords: bool = False,
+) -> str:
     """
-    Wrap a value in double quotes when it would otherwise split into multiple
-    protocol tokens, escaping the characters that are special inside a quoted
-    token.
+    Wrap a value in double quotes when it would otherwise be read as something
+    other than one literal token, escaping the characters that are special
+    inside a quoted token.
 
     Mirrors the C++ client's ``EscapeQueryString`` / ``QuoteCommandArgumentIfNeeded``:
-    a value is quoted when it is empty or contains whitespace or a quote
-    character. Inside the quotes, ``"`` and ``\\`` are backslash-escaped and any
-    remaining control characters (code < 0x20) are dropped. Values that need no
-    quoting are returned verbatim so simple single-token queries stay
-    byte-identical on the wire.
-
-    ``quote_on_backslash`` selects which upstream helper is mirrored: query
-    strings follow ``EscapeQueryString`` (a lone backslash does NOT force
-    quoting), while command arguments follow ``QuoteCommandArgumentIfNeeded``
-    (a backslash does).
+    a value is quoted when it is empty, contains one of ``trigger_chars``, or —
+    for a query token — spells a clause keyword. Inside the quotes, ``"`` and
+    ``\\`` are backslash-escaped and any remaining control characters
+    (code < 0x20) are dropped. Values that need no quoting are returned
+    verbatim so simple single-token queries stay byte-identical on the wire.
 
     Args:
         value: Value to quote (already control-char validated by the caller).
-        quote_on_backslash: Whether a lone ``\\`` forces quoting.
+        trigger_chars: Characters whose presence forces quoting.
+        quote_clause_keywords: Whether a value spelling a clause keyword
+            (``AND``, ``LIMIT``, ...) forces quoting.
 
     Returns:
         Wire-safe single token.
@@ -83,10 +110,9 @@ def _quote_token_if_needed(value: str, quote_on_backslash: bool) -> str:
     if value == "":
         return '""'
 
-    needs_quotes = any(
-        ch in _QUOTE_TRIGGER_CHARS or (quote_on_backslash and ch == "\\")
-        for ch in value
-    )
+    needs_quotes = any(ch in trigger_chars for ch in value)
+    if not needs_quotes and quote_clause_keywords:
+        needs_quotes = value.upper() in _CLAUSE_KEYWORDS
     if not needs_quotes:
         return value
 
@@ -110,12 +136,16 @@ def escape_query_string(value: str) -> str:
     form unambiguous: an unquoted empty arg would collapse into surrounding
     whitespace and produce a malformed command (e.g. ``SEARCH table  AND foo``).
 
-    Values containing whitespace, double quotes or single quotes are wrapped
-    in double quotes with internal quotes/backslashes escaped. Control
-    characters are stripped to prevent command injection. Matches the C++
-    client's ``EscapeQueryString`` (a lone backslash does not force quoting).
+    Values containing whitespace, a quote, a backslash or a parenthesis are
+    wrapped in double quotes with internal quotes/backslashes escaped, as is a
+    value that spells a clause keyword (``AND``, ``LIMIT``, ...) — unquoted it
+    would open a clause or a boolean group instead of matching as text.
+    Control characters are stripped to prevent command injection. Matches the
+    C++ client's ``EscapeQueryString``.
     """
-    return _quote_token_if_needed(value, quote_on_backslash=False)
+    return _quote_token_if_needed(
+        value, _QUERY_QUOTE_TRIGGER_CHARS, quote_clause_keywords=True
+    )
 
 
 def quote_command_argument(value: str, field_name: str) -> str:
@@ -125,10 +155,11 @@ def quote_command_argument(value: str, field_name: str) -> str:
     whitespace or quote characters. Mirrors the C++ client's
     ``QuoteCommandArgumentIfNeeded``.
 
-    Unlike :func:`escape_query_string`, a lone backslash forces quoting and the
-    value is validated for control characters (which would otherwise be
-    silently dropped). An empty value is allowed and surfaced as the explicit
-    empty token ``""``.
+    Unlike :func:`escape_query_string`, a clause keyword or a parenthesis is
+    left unquoted (an argument is never read as query text) and the value is
+    validated for control characters, which would otherwise be silently
+    dropped. An empty value is allowed and surfaced as the explicit empty
+    token ``""``.
 
     Args:
         value: Argument value.
@@ -142,7 +173,7 @@ def quote_command_argument(value: str, field_name: str) -> str:
     """
     if value != "":
         ensure_safe_command_value(value, field_name)
-    return _quote_token_if_needed(value, quote_on_backslash=True)
+    return _quote_token_if_needed(value, _COMMAND_QUOTE_TRIGGER_CHARS)
 
 
 def qualify_table_identity(table: str, database: Optional[str] = None) -> str:
@@ -274,6 +305,34 @@ def ensure_safe_filters(filters: Dict[str, str]) -> None:
             raise InputValidationError(
                 f"Filter value for '{key}' contains invalid control characters"
             )
+
+
+def ensure_safe_filter_conditions(conditions: List[FilterCondition]) -> None:
+    """
+    Validate a list of comparison filters (MygramDB v1.9+).
+
+    The column is sent unquoted on the wire, so it is validated as an
+    identifier; the operator must be one of the six the server accepts; the
+    value is checked for control characters (it is quoted at send time).
+
+    Args:
+        conditions: Comparison filters to validate.
+
+    Raises:
+        InputValidationError: When a column, operator or value is unusable.
+    """
+    valid_ops = {op.value for op in FilterOp}
+    for i, condition in enumerate(conditions):
+        validate_identifier(condition.column, f"filter_conditions[{i}].column")
+        op_value = getattr(condition.op, "value", condition.op)
+        if op_value not in valid_ops:
+            raise InputValidationError(
+                f"filter_conditions[{i}] has invalid operator {op_value!r}: "
+                f"must be one of {sorted(valid_ops)}"
+            )
+        ensure_safe_command_value(
+            condition.value, f"filter_conditions[{i}].value"
+        )
 
 
 def calculate_query_expression_length(

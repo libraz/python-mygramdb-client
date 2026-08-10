@@ -95,6 +95,83 @@ final: 1"""
             MygramClient._parse_search_response("INVALID")
 
 
+class TestHighlightSearchResponseParsing:
+    """A highlighted result set is one tab-separated row per document."""
+
+    def test_parse_multiline_highlight_response(self):
+        response = (
+            "OK RESULTS 2\n"
+            "id1\tHello <em>world</em>\n"
+            "id2\tGoodbye <em>world</em>"
+        )
+        result = MygramClient._parse_search_response(response)
+
+        assert result.total_count == 2
+        assert len(result.results) == 2
+        assert result.results[0].primary_key == "id1"
+        assert result.results[0].snippet == "Hello <em>world</em>"
+        assert result.results[1].primary_key == "id2"
+        assert result.results[1].snippet == "Goodbye <em>world</em>"
+
+    def test_parse_highlight_with_empty_snippet(self):
+        result = MygramClient._parse_search_response("OK RESULTS 1\nid1\t")
+
+        assert result.total_count == 1
+        assert result.results[0].primary_key == "id1"
+        assert result.results[0].snippet == ""
+
+    def test_parse_highlight_without_tab_treated_as_pk(self):
+        """A payload line without a tab should be treated as a bare PK."""
+        result = MygramClient._parse_search_response("OK RESULTS 1\nid1")
+
+        assert result.total_count == 1
+        assert result.results[0].primary_key == "id1"
+        assert result.results[0].snippet == ""
+
+    def test_classic_single_line_still_works(self):
+        """Regression test: classic SEARCH response must still parse."""
+        result = MygramClient._parse_search_response("OK RESULTS 3 id1 id2 id3")
+
+        assert result.total_count == 3
+        assert len(result.results) == 3
+        assert [r.primary_key for r in result.results] == ["id1", "id2", "id3"]
+        assert all(r.snippet is None for r in result.results)
+
+    def test_highlight_with_debug_block(self):
+        response = (
+            "OK RESULTS 1\n"
+            "id1\tmatched <em>x</em>\n"
+            "# DEBUG\n"
+            "query_time: 1.5\n"
+            "terms: 2"
+        )
+        result = MygramClient._parse_search_response(response)
+
+        assert result.total_count == 1
+        assert result.results[0].primary_key == "id1"
+        assert result.results[0].snippet == "matched <em>x</em>"
+        assert result.debug is not None
+        assert result.debug.query_time_ms == 1.5
+
+    def test_debug_block_tolerates_ms_unit_suffix(self):
+        # The server emits timings with a trailing unit (e.g. "0.011ms").
+        response = (
+            "OK RESULTS 1\n"
+            "id1\tmatched <em>x</em>\n"
+            "# DEBUG\n"
+            "query_time: 0.011ms\n"
+            "index_time: 1.250ms\n"
+            "filter_time: 0.5ms\n"
+            "terms: 2"
+        )
+        result = MygramClient._parse_search_response(response)
+
+        assert result.debug is not None
+        assert result.debug.query_time_ms == 0.011
+        assert result.debug.index_time_ms == 1.25
+        assert result.debug.filter_time_ms == 0.5
+
+
 class TestCountResponseParsing:
     """Tests for count response parsing."""
 
@@ -120,6 +197,24 @@ terms: 1"""
     def test_parse_invalid_count_response_raises_error(self):
         with pytest.raises(ProtocolError, match="Invalid COUNT response"):
             MygramClient._parse_count_response("INVALID")
+
+    def test_trailing_token_is_rejected(self):
+        # Strict header parsing (v1.10+): anything but "OK COUNT <decimal>" is
+        # a different frame, not a count to be read out of it.
+        with pytest.raises(ProtocolError, match="Invalid COUNT response"):
+            MygramClient._parse_count_response("OK COUNT 42 extra")
+
+    def test_non_numeric_count_is_rejected(self):
+        with pytest.raises(ProtocolError, match="Invalid COUNT response"):
+            MygramClient._parse_count_response("OK COUNT many")
+
+    def test_debug_block_is_still_parsed(self):
+        response = "OK COUNT 42\n\n# DEBUG\nquery_time: 1.5ms"
+        result = MygramClient._parse_count_response(response)
+
+        assert result.count == 42
+        assert result.debug is not None
+        assert result.debug.query_time_ms == 1.5
 
 
 class TestDocumentResponseParsing:
@@ -172,6 +267,38 @@ tables: articles, users"""
     def test_parse_invalid_info_response_raises_error(self):
         with pytest.raises(ProtocolError, match="Invalid INFO response"):
             MygramClient._parse_info_response("INVALID")
+
+    def test_info_reports_data_initialized_and_readiness(self):
+        # Readiness over TCP (v1.10+).
+        response = (
+            "OK INFO\n"
+            "version: 1.10.0\n"
+            "data_initialized: true\n"
+            "readiness: ready\n"
+            "END"
+        )
+        info = MygramClient._parse_info_response(response)
+
+        assert info.data_initialized is True
+        assert info.ready is True
+
+    def test_not_ready_is_reported(self):
+        response = (
+            "OK INFO\n"
+            "data_initialized: false\n"
+            "readiness: not_ready\n"
+            "END"
+        )
+        info = MygramClient._parse_info_response(response)
+
+        assert info.data_initialized is False
+        assert info.ready is False
+
+    def test_older_server_without_the_fields_reports_not_ready(self):
+        info = MygramClient._parse_info_response("OK INFO\nversion: 1.8.0\nEND")
+
+        assert info.data_initialized is False
+        assert info.ready is False
 
 
 class TestReplicationStatusParsing:
@@ -269,6 +396,22 @@ class TestDebugInfoParsing:
         assert result.cache == "hit"
         assert result.cache_age_ms == 123.4
         assert result.cache_saved_ms == 2100.0
+
+    def test_parse_debug_info_with_cache_miss_fields(self):
+        lines = [
+            "cache: miss",
+            "cache_reason: invalidated",
+            "cache_cost_ms: 18.250",
+            "cache_key: articles|python",
+            "highlight: on",
+        ]
+        result = MygramClient._parse_debug_info(lines)
+
+        assert result.cache == "miss"
+        assert result.cache_reason == "invalidated"
+        assert result.cache_cost_ms == 18.25
+        assert result.cache_key == "articles|python"
+        assert result.highlight is True
 
 
 class TestDumpStatusParsing:
@@ -384,6 +527,71 @@ cache_misses: 0"""
 
         assert result.enabled is False
         assert result.hits == 0
+
+    def test_parse_cache_stats_full_response(self):
+        """Every counter the server reports is surfaced on CacheStats."""
+        response = """OK CACHE_STATS
+
+# Cache
+enabled: true
+total_queries: 6000
+cache_hits: 5000
+cache_misses: 1000
+hit_rate: 0.8333
+current_entries: 500
+current_memory_bytes: 10485760
+invalidation_index_memory_bytes: 4096
+invalidation_queue_memory_bytes: 2048
+accounted_memory_bytes: 10491904
+evictions: 50
+ttl_expirations: 7
+rejection_count: 9
+rejection_oversize: 4
+rejection_memory_budget: 3
+rejection_duplicate: 2
+stale_entry_removals: 6
+decompression_failures: 1
+stale_lru_entries: 8
+invalidations_immediate: 30
+invalidations_deferred: 20
+invalidations_batches: 5
+avg_cache_hit_time_ms: 0.250
+avg_cache_miss_time_ms: 12.500
+total_time_saved_ms: 61250.000
+
+END"""
+        result = MygramClient._parse_cache_stats_response(response)
+
+        assert result.total_queries == 6000
+        assert result.hit_rate == 0.8333
+        assert result.invalidation_index_memory_bytes == 4096
+        assert result.invalidation_queue_memory_bytes == 2048
+        assert result.accounted_memory_bytes == 10491904
+        assert result.ttl_expirations == 7
+        assert result.rejection_count == 9
+        assert result.rejection_oversize == 4
+        assert result.rejection_memory_budget == 3
+        assert result.rejection_duplicate == 2
+        assert result.stale_entry_removals == 6
+        assert result.decompression_failures == 1
+        assert result.stale_lru_entries == 8
+        assert result.invalidations_immediate == 30
+        assert result.invalidations_deferred == 20
+        assert result.invalidations_batches == 5
+        assert result.avg_cache_hit_time_ms == 0.25
+        assert result.avg_cache_miss_time_ms == 12.5
+        assert result.total_time_saved_ms == 61250.0
+
+    def test_parse_cache_stats_older_server_keeps_defaults(self):
+        response = """OK CACHE_STATS
+enabled: true
+cache_hits: 1
+cache_misses: 0"""
+        result = MygramClient._parse_cache_stats_response(response)
+
+        assert result.total_queries == 0
+        assert result.avg_cache_hit_time_ms is None
+        assert result.total_time_saved_ms == 0.0
 
     def test_parse_invalid_cache_stats_raises_error(self):
         with pytest.raises(ProtocolError, match="Invalid CACHE STATS"):

@@ -6,12 +6,14 @@ This module provides an async client for connecting to and querying MygramDB ser
 import asyncio
 import re
 import socket
+import time
 from dataclasses import replace
 from typing import Dict, List, Optional
 
 from .command_utils import (
     ensure_query_length_within_limit,
     ensure_safe_command_value,
+    ensure_safe_filter_conditions,
     ensure_safe_filters,
     ensure_safe_string_array,
     escape_query_string,
@@ -25,8 +27,8 @@ from .errors import (
     ConnectionError,
     InputValidationError,
     ProtocolError,
-    ServerError,
     TimeoutError,
+    parse_error_frame,
 )
 from .types import (
     CacheStats,
@@ -39,7 +41,9 @@ from .types import (
     FacetOptions,
     FacetResponse,
     FacetValue,
+    FilterCondition,
     HighlightOptions,
+    QueryMode,
     ReplicationStatus,
     SearchOptions,
     SearchRawOptions,
@@ -98,12 +102,29 @@ class MygramClient:
         """
         Connect to MygramDB server via TCP or Unix socket.
 
+        When :attr:`ClientConfig.admin_token` is set, ``AUTH`` is issued on the
+        fresh connection before it is handed back, so administrative commands
+        work immediately (MygramDB v1.10+).
+
         Raises:
             ConnectionError: If connection fails.
+            AuthenticationError: If the configured admin token is rejected.
         """
         if self._connected:
             return
 
+        async with self._get_command_lock():
+            # Another caller may have connected while this one waited.
+            if self._connected:
+                return
+            await self._open_connection()
+            await self._authenticate_if_configured()
+
+    async def _open_connection(self) -> None:
+        """
+        Open the transport without authenticating. The caller holds the command
+        lock and is responsible for the ``AUTH`` handshake.
+        """
         try:
             if self.config.socket_path:
                 self._reader, self._writer = await asyncio.wait_for(
@@ -130,10 +151,68 @@ class MygramClient:
         return self.config.timeout
 
     def _command_timeout(self) -> float:
-        """Effective per-read timeout (``command_timeout`` or ``timeout``)."""
+        """Effective total response deadline (``command_timeout`` or ``timeout``)."""
         if self.config.command_timeout is not None:
             return self.config.command_timeout
         return self.config.timeout
+
+    async def _authenticate_if_configured(self) -> None:
+        """
+        Issue ``AUTH`` when a token is configured. The caller holds the command
+        lock, so this bypasses :meth:`send_command` and talks to the socket
+        directly. A rejected or unexpected reply tears the connection down
+        rather than leaving an unauthenticated socket that would fail later on
+        the first administrative command.
+        """
+        token = self.config.admin_token
+        if not token:
+            return
+
+        try:
+            response = await self._exchange(
+                f"AUTH {quote_command_argument(token, 'admin_token')}"
+            )
+            if not response.startswith("OK AUTHENTICATED"):
+                raise ProtocolError(f"Invalid AUTH response: {response}")
+        except BaseException:
+            await self._drop_connection()
+            raise
+
+    async def _drop_connection(self) -> None:
+        """Close the socket without waiting, and mark the client disconnected."""
+        if self._writer is not None:
+            try:
+                self._writer.close()
+            except Exception:
+                pass
+        self._reader = None
+        self._writer = None
+        self._connected = False
+
+    async def authenticate(self, token: str) -> None:
+        """
+        Authenticate this connection for administrative commands
+        (MygramDB v1.10+).
+
+        Only needed for an ad-hoc token; setting
+        :attr:`ClientConfig.admin_token` authenticates automatically on connect
+        and on every transparent reconnect, which is what a long-lived client
+        wants.
+
+        Args:
+            token: Administrative token (``api.admin_token`` on the server).
+
+        Raises:
+            AuthenticationError: If the server rejects the token.
+            ProtocolError: If the reply is not an ``AUTH`` acknowledgement.
+        """
+        if token == "":
+            raise InputValidationError("Input for token is empty")
+        response = await self.send_command(
+            f"AUTH {quote_command_argument(token, 'token')}"
+        )
+        if not response.startswith("OK AUTHENTICATED"):
+            raise ProtocolError(f"Invalid AUTH response: {response}")
 
     def _apply_keepalive(self) -> None:
         """
@@ -198,6 +277,29 @@ class MygramClient:
             parts.extend(["MAX_FRAGMENTS", str(highlight.max_fragments)])
 
     @staticmethod
+    def _append_filter_clauses(
+        parts: List[str],
+        filters: Dict[str, str],
+        filter_conditions: List[FilterCondition],
+    ) -> None:
+        """
+        Append every FILTER clause to a command's token list: the equality
+        ``filters`` dict first, then the explicit-operator ``filter_conditions``
+        (MygramDB v1.9+). Both forms use the same three-token wire shape
+        ``FILTER <column> <op> <value>``.
+        """
+        for key, value in filters.items():
+            parts.extend(["FILTER", key, "=", escape_query_string(value)])
+        for condition in filter_conditions:
+            operator = getattr(condition.op, "value", condition.op)
+            parts.extend([
+                "FILTER",
+                condition.column,
+                str(operator),
+                escape_query_string(condition.value),
+            ])
+
+    @staticmethod
     def _append_limit_offset(parts: List[str], limit: int, offset: int) -> None:
         """
         Append the LIMIT / OFFSET clause to a command's token list.
@@ -224,11 +326,20 @@ class MygramClient:
         """
         Search for documents in a table.
 
+        By default ``query`` is literal text: reserved words such as ``AND`` or
+        ``LIMIT`` are quoted so they match as terms. Set
+        ``options.query_mode`` to :attr:`QueryMode.BOOLEAN` to have the server
+        parse ``AND`` / ``OR`` / ``NOT`` and parentheses as operators while
+        still applying filters, sorting, fuzzy matching and highlighting
+        (MygramDB v1.10+) — something :meth:`search_raw` cannot express.
+
         Args:
             table: Table name to search in.
-            query: Search query text.
-            options: Search options including limit, offset, and_terms, not_terms,
-                     filters, sort_column, and sort_desc.
+            query: Search query text, or a boolean expression when
+                   ``options.query_mode`` is :attr:`QueryMode.BOOLEAN`.
+            options: Search options including limit, offset, query_mode,
+                     and_terms, not_terms, filters, filter_conditions,
+                     sort_column, and sort_desc.
 
         Returns:
             Search response containing results array, total_count, and
@@ -248,6 +359,17 @@ class MygramClient:
         ensure_safe_filters(opts.filters)
         for key in opts.filters:
             validate_identifier(key, "filter key")
+        ensure_safe_filter_conditions(opts.filter_conditions)
+
+        if opts.query_mode not in (QueryMode.LITERAL, QueryMode.BOOLEAN):
+            raise InputValidationError(
+                f"Invalid query_mode {opts.query_mode!r}: "
+                f"must be one of {[m.value for m in QueryMode]}"
+            )
+        if opts.query_mode == QueryMode.BOOLEAN and query == "":
+            raise InputValidationError(
+                "Input for query must not be empty in boolean query mode"
+            )
 
         if opts.sort_column:
             validate_identifier(opts.sort_column, "sort column")
@@ -262,7 +384,15 @@ class MygramClient:
             opts.not_terms,
         )
 
-        parts: List[str] = ["SEARCH", table, escape_query_string(query)]
+        # Boolean mode sends the expression verbatim so the server's AST parser
+        # sees the operators; quoting it would collapse the whole expression
+        # into one literal phrase. It was validated above as non-empty and free
+        # of control characters, so it cannot inject a second command.
+        wire_query = (
+            query if opts.query_mode == QueryMode.BOOLEAN
+            else escape_query_string(query)
+        )
+        parts: List[str] = ["SEARCH", table, wire_query]
 
         # Add AND terms
         for term in opts.and_terms:
@@ -273,12 +403,15 @@ class MygramClient:
             parts.extend(["NOT", escape_query_string(term)])
 
         # Add filters
-        for key, value in opts.filters.items():
-            parts.extend(["FILTER", key, "=", escape_query_string(value)])
+        self._append_filter_clauses(parts, opts.filters, opts.filter_conditions)
 
-        # Add sort (use _score for BM25 in MygramDB v1.6+)
+        # Add sort (use _score for BM25 in MygramDB v1.6+). Without a column the
+        # server orders by primary key descending, so only the ascending case
+        # needs the bare `SORT ASC` shorthand.
         if opts.sort_column:
             parts.extend(["SORT", opts.sort_column, "DESC" if opts.sort_desc else "ASC"])
+        elif not opts.sort_desc:
+            parts.extend(["SORT", "ASC"])
 
         # Add fuzzy (MygramDB v1.6+)
         if opts.fuzzy > 0:
@@ -428,6 +561,7 @@ class MygramClient:
         ensure_safe_filters(opts.filters)
         for key in opts.filters:
             validate_identifier(key, "filter key")
+        ensure_safe_filter_conditions(opts.filter_conditions)
 
         ensure_query_length_within_limit(
             query,
@@ -447,8 +581,7 @@ class MygramClient:
             parts.extend(["NOT", escape_query_string(term)])
 
         # Add filters
-        for key, value in opts.filters.items():
-            parts.extend(["FILTER", key, "=", escape_query_string(value)])
+        self._append_filter_clauses(parts, opts.filters, opts.filter_conditions)
 
         response = await self.send_command(" ".join(parts))
         return self._parse_count_response(response)
@@ -718,13 +851,18 @@ class MygramClient:
         across the entire table. When provided, the aggregation is scoped
         to documents matching the query (with optional AND/NOT/FILTER refinements).
 
+        ``options.limit`` and ``options.offset`` paginate the distinct values;
+        :attr:`FacetResponse.total_count` reports how many exist in total
+        (MygramDB v1.9+).
+
         Args:
             table: Table name.
             column: Filter column to aggregate.
-            options: Optional query, refinements and limit.
+            options: Optional query, refinements, limit and offset.
 
         Returns:
-            FacetResponse with facet values and counts.
+            FacetResponse with facet values, counts and the total distinct
+            value count.
 
         Raises:
             ConnectionError: If not connected to server.
@@ -742,6 +880,7 @@ class MygramClient:
         ensure_safe_filters(opts.filters)
         for key in opts.filters:
             validate_identifier(key, "filter key")
+        ensure_safe_filter_conditions(opts.filter_conditions)
         ensure_query_length_within_limit(
             opts.query,
             self.config.max_query_length,
@@ -749,19 +888,19 @@ class MygramClient:
             opts.not_terms,
         )
 
+        # The search text follows the column directly; FACET has no keyword
+        # introducing it. Refinements apply with or without one, so they are
+        # emitted even for a whole-table facet.
         parts: List[str] = ["FACET", table, column]
-
         if opts.query:
-            parts.extend(["QUERY", escape_query_string(opts.query)])
-            for term in opts.and_terms:
-                parts.extend(["AND", escape_query_string(term)])
-            for term in opts.not_terms:
-                parts.extend(["NOT", escape_query_string(term)])
-            for key, value in opts.filters.items():
-                parts.extend(["FILTER", key, "=", escape_query_string(value)])
+            parts.append(escape_query_string(opts.query))
+        for term in opts.and_terms:
+            parts.extend(["AND", escape_query_string(term)])
+        for term in opts.not_terms:
+            parts.extend(["NOT", escape_query_string(term)])
+        self._append_filter_clauses(parts, opts.filters, opts.filter_conditions)
 
-        if opts.limit > 0:
-            parts.extend(["LIMIT", str(opts.limit)])
+        self._append_limit_offset(parts, opts.limit, opts.offset)
 
         response = await self.send_command(" ".join(parts))
         return self._parse_facet_response(response)
@@ -896,7 +1035,6 @@ class MygramClient:
         the write is surfaced without resending (the command may have applied).
         """
         reconnected = False
-        payload = f"{command}\r\n".encode("utf-8")
 
         while True:
             if not self._connected or not self._writer or not self._reader:
@@ -913,8 +1051,7 @@ class MygramClient:
             # Send phase: a failure here has written nothing the server acted
             # on, so it is safe to reconnect and resend once.
             try:
-                self._writer.write(payload)
-                await self._writer.drain()
+                await self._write_command(command)
             except asyncio.TimeoutError:
                 raise TimeoutError("Command timeout")
             except OSError as e:
@@ -944,34 +1081,55 @@ class MygramClient:
                 # EOF from _read_response: mark dead so the next call can heal.
                 self._connected = False
                 raise
+            except ProtocolError:
+                # The frame cap tripped: the rest of the oversized response is
+                # still in flight, so the socket cannot be reused.
+                self._connected = False
+                raise
             except OSError as e:
                 self._connected = False
                 raise ConnectionError(f"Connection error: {e}")
 
-            # Normalize CRLF to LF
-            response = response.replace("\r\n", "\n").strip()
+            return self._decode_response(response)
 
-            # Check for error response
-            if response.startswith("ERROR "):
-                raise ServerError(response[6:])
+    async def _write_command(self, command: str) -> None:
+        """Write one command frame. The caller holds the command lock."""
+        assert self._writer is not None
+        self._writer.write(f"{command}\r\n".encode("utf-8"))
+        await self._writer.drain()
 
-            return response
+    @staticmethod
+    def _decode_response(response: str) -> str:
+        """
+        Normalize CRLF framing and turn an ``ERROR`` frame into the matching
+        exception. A MygramDB v1.10+ frame carries a numeric code, which
+        selects a specific :class:`ServerError` subclass; an untyped frame from
+        an older server yields a plain :class:`ServerError`.
+        """
+        response = response.replace("\r\n", "\n").strip()
+        if response.startswith("ERROR "):
+            raise parse_error_frame(response)
+        return response
+
+    async def _exchange(self, command: str) -> str:
+        """
+        Send one command and return its decoded response, with no reconnect or
+        resend. Used by the ``AUTH`` handshake, which runs while the command
+        lock is already held and must not recurse into reconnect logic.
+        """
+        await self._write_command(command)
+        return self._decode_response(await self._read_response())
 
     async def _reconnect(self) -> None:
         """
-        Tear down any half-open socket and reconnect. The caller holds the
-        command lock. ``wait_closed`` is skipped so a dead socket cannot stall
-        the reconnect.
+        Tear down any half-open socket and reconnect, re-authenticating when a
+        token is configured. The caller holds the command lock, so this goes
+        through the lock-free open path rather than :meth:`connect`.
+        ``wait_closed`` is skipped so a dead socket cannot stall the reconnect.
         """
-        if self._writer is not None:
-            try:
-                self._writer.close()
-            except Exception:
-                pass
-        self._reader = None
-        self._writer = None
-        self._connected = False
-        await self.connect()
+        await self._drop_connection()
+        await self._open_connection()
+        await self._authenticate_if_configured()
 
     async def _read_response(self) -> str:
         """Read complete response from server.
@@ -981,16 +1139,27 @@ class MygramClient:
         so a multibyte character split across two reads cannot raise mid-stream;
         terminators are ASCII, so ignoring a trailing partial code point never
         hides one. The returned string is a strict decode of the full buffer.
+
+        The timeout is one deadline for the whole response rather than a timer
+        restarted by each partial read, so a server that trickles bytes cannot
+        hold a command open indefinitely. ``max_response_bytes`` caps a single
+        frame.
         """
         # Only reached from send_command, which guarantees a live connection.
         assert self._reader is not None
         buffer = bytearray()
+        deadline = time.monotonic() + self._command_timeout()
+        max_response_bytes = self.config.max_response_bytes
 
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Read timeout")
+
             try:
                 data = await asyncio.wait_for(
                     self._reader.read(self.config.recv_buffer_size),
-                    timeout=self._command_timeout(),
+                    timeout=remaining,
                 )
             except asyncio.TimeoutError:
                 raise TimeoutError("Read timeout")
@@ -999,6 +1168,12 @@ class MygramClient:
                 raise ConnectionError("Connection closed by server")
 
             buffer.extend(data)
+
+            if 0 < max_response_bytes < len(buffer):
+                raise ProtocolError(
+                    f"Response exceeds max_response_bytes "
+                    f"({max_response_bytes}): received {len(buffer)} bytes"
+                )
 
             # Check if response is complete (lenient probe on partial bytes).
             probe = buffer.decode("utf-8", errors="ignore")
@@ -1171,12 +1346,16 @@ class MygramClient:
         """
         Parse FACET response (MygramDB v1.6+).
 
-        Format::
+        Format (MygramDB v1.9+)::
 
-            OK FACET <num_values>
+            OK FACET <page_values> <total_values>
             <value1>\\t<count1>
             <value2>\\t<count2>
             ...
+
+        ``<page_values>`` is the number of rows in this page, ``<total_values>``
+        the distinct value count before OFFSET and LIMIT. An older server emits
+        only ``<page_values>``, in which case the total mirrors the page size.
 
         Comment lines (``#`` with no tab) are ignored. A facet value may itself
         start with ``#``; such a row still carries a tab separating the value
@@ -1192,9 +1371,18 @@ class MygramClient:
         if len(header_parts) < 3:
             raise ProtocolError("Invalid FACET response: missing count")
         try:
-            int(header_parts[2])
+            page_count = int(header_parts[2])
         except ValueError:
             raise ProtocolError(f"Invalid FACET count: {header_parts[2]}")
+
+        total_count = page_count
+        if len(header_parts) > 3:
+            try:
+                total_count = int(header_parts[3])
+            except ValueError:
+                raise ProtocolError(
+                    f"Invalid FACET total count: {header_parts[3]}"
+                )
 
         results: List[FacetValue] = []
         for line in lines[1:]:
@@ -1213,18 +1401,28 @@ class MygramClient:
                 )
             results.append(FacetValue(value=value, count=count))
 
-        return FacetResponse(results=results)
+        return FacetResponse(results=results, total_count=total_count)
 
     @staticmethod
     def _parse_count_response(response: str) -> CountResponse:
-        """Parse COUNT response."""
+        """
+        Parse COUNT response (``OK COUNT <n>``).
+
+        Parsing is strict: the header must be exactly three tokens with a
+        decimal count. A trailing token means the reply is not the response
+        this command expects, and silently reading the third token would report
+        a plausible-looking number from a frame that means something else.
+        """
         lines = response.split("\n")
         first_line = lines[0]
 
         if not first_line.startswith("OK COUNT "):
             raise ProtocolError(f"Invalid COUNT response: {first_line}")
 
-        count = int(first_line.split(" ")[2])
+        header_parts = first_line.split(" ")
+        if len(header_parts) != 3 or not header_parts[2].isdigit():
+            raise ProtocolError(f"Invalid COUNT response: {first_line}")
+        count = int(header_parts[2])
 
         # Parse debug info if present
         debug = None
@@ -1288,6 +1486,10 @@ class MygramClient:
                 info.doc_count = int(value)
             elif key == "tables":
                 info.tables = [s.strip() for s in value.split(",")]
+            elif key == "data_initialized":
+                info.data_initialized = value == "true"
+            elif key == "readiness":
+                info.ready = value == "ready"
 
         return info
 
@@ -1425,6 +1627,14 @@ class MygramClient:
                 debug.cache_age_ms = MygramClient._parse_leading_float(value)
             elif key == "cache_saved_ms":
                 debug.cache_saved_ms = MygramClient._parse_leading_float(value)
+            elif key == "cache_reason":
+                debug.cache_reason = value
+            elif key == "cache_cost_ms":
+                debug.cache_cost_ms = MygramClient._parse_leading_float(value)
+            elif key == "cache_key":
+                debug.cache_key = value
+            elif key == "highlight":
+                debug.highlight = value == "on"
             elif key == "limit":
                 debug.limit = int(value.replace("(default)", "").strip())
             elif key == "offset":
@@ -1517,6 +1727,42 @@ class MygramClient:
                 stats.current_memory_mb = float(value)
             elif key == "ttl_seconds":
                 stats.ttl_seconds = int(value)
+            elif key == "total_queries":
+                stats.total_queries = int(value)
+            elif key == "invalidation_index_memory_bytes":
+                stats.invalidation_index_memory_bytes = int(value)
+            elif key == "invalidation_queue_memory_bytes":
+                stats.invalidation_queue_memory_bytes = int(value)
+            elif key == "accounted_memory_bytes":
+                stats.accounted_memory_bytes = int(value)
+            elif key == "ttl_expirations":
+                stats.ttl_expirations = int(value)
+            elif key == "rejection_count":
+                stats.rejection_count = int(value)
+            elif key == "rejection_oversize":
+                stats.rejection_oversize = int(value)
+            elif key == "rejection_memory_budget":
+                stats.rejection_memory_budget = int(value)
+            elif key == "rejection_duplicate":
+                stats.rejection_duplicate = int(value)
+            elif key == "stale_entry_removals":
+                stats.stale_entry_removals = int(value)
+            elif key == "decompression_failures":
+                stats.decompression_failures = int(value)
+            elif key == "stale_lru_entries":
+                stats.stale_lru_entries = int(value)
+            elif key == "invalidations_immediate":
+                stats.invalidations_immediate = int(value)
+            elif key == "invalidations_deferred":
+                stats.invalidations_deferred = int(value)
+            elif key == "invalidations_batches":
+                stats.invalidations_batches = int(value)
+            elif key == "avg_cache_hit_time_ms":
+                stats.avg_cache_hit_time_ms = float(value)
+            elif key == "avg_cache_miss_time_ms":
+                stats.avg_cache_miss_time_ms = float(value)
+            elif key == "total_time_saved_ms":
+                stats.total_time_saved_ms = float(value)
 
         return stats
 

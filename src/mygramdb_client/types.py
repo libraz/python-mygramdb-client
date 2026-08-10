@@ -15,9 +15,58 @@ from typing import (
     TypeVar,
 )
 
-from .errors import ConnectionError, TimeoutError
+from .errors import (
+    ConnectionError,
+    ServerBusyError,
+    ServerNotReadyError,
+    TimeoutError,
+)
 
 _T = TypeVar("_T")
+
+
+class QueryMode(str, Enum):
+    """
+    How the server should interpret the search text (MygramDB v1.10+).
+
+    ``LITERAL`` is the default on every surface: the text is quoted so that
+    reserved words such as ``AND`` or ``LIMIT`` are matched literally rather
+    than parsed as operators. ``BOOLEAN`` sends the text unquoted so the
+    server's AST parser interprets ``AND`` / ``OR`` / ``NOT`` and parentheses —
+    combine it with filters, sorting, fuzzy matching and highlighting, which
+    :meth:`MygramClient.search_raw` cannot express.
+    """
+
+    LITERAL = "literal"
+    BOOLEAN = "boolean"
+
+
+class FilterOp(str, Enum):
+    """Comparison operator for a FILTER clause (MygramDB v1.9+)."""
+
+    EQ = "="
+    NE = "!="
+    GT = ">"
+    GTE = ">="
+    LT = "<"
+    LTE = "<="
+
+
+@dataclass
+class FilterCondition:
+    """
+    A single comparison filter (MygramDB v1.9+).
+
+    ``SearchOptions.filters`` (a plain dict) covers the equality case; this
+    carries an explicit operator for range and inequality predicates.
+
+    Example:
+        >>> FilterCondition("published_at", "2026-01-01", FilterOp.GTE)
+    """
+
+    column: str
+    value: str
+    op: FilterOp = FilterOp.EQ
 
 
 @dataclass
@@ -33,9 +82,31 @@ class ClientConfig:
 
     command_timeout: Optional[float] = None
     """
-    Per-read timeout while awaiting a command response. ``None`` falls back to
-    ``timeout``. Split from ``connect_timeout`` so a fast connect deadline can
-    coexist with a longer allowance for heavy queries.
+    Total deadline for a command's response. ``None`` falls back to ``timeout``.
+    Split from ``connect_timeout`` so a fast connect deadline can coexist with a
+    longer allowance for heavy queries.
+
+    The deadline covers the whole response, not each socket read: a server that
+    trickles bytes indefinitely can no longer keep a command alive forever by
+    resetting a per-read timer (MygramDB v1.10 client semantics).
+    """
+
+    max_response_bytes: int = 64 * 1024 * 1024
+    """
+    Upper bound on a single response frame. A response that grows past this is
+    rejected with :class:`ProtocolError` and the connection is dropped, so a
+    malformed or hostile reply cannot exhaust memory. ``0`` disables the cap.
+    """
+
+    admin_token: str = ""
+    """
+    Administrative token sent as ``AUTH <token>`` immediately after every
+    connect and reconnect (MygramDB v1.10+).
+
+    Required when the server binds to a non-loopback address; without it,
+    administrative commands are rejected with :class:`AuthenticationError`.
+    The TCP transport does not encrypt the token — keep that listener on a
+    trusted network or behind a terminating proxy.
     """
 
     recv_buffer_size: int = 65536
@@ -95,6 +166,22 @@ class SearchOptions:
     and_terms: List[str] = field(default_factory=list)
     not_terms: List[str] = field(default_factory=list)
     filters: Dict[str, str] = field(default_factory=dict)
+    """Equality filters, ``column -> value``."""
+
+    filter_conditions: List[FilterCondition] = field(default_factory=list)
+    """
+    Comparison filters with an explicit operator (MygramDB v1.9+), emitted
+    after the equality ``filters``. Use for range and inequality predicates
+    that a plain dict cannot express.
+    """
+
+    query_mode: QueryMode = QueryMode.LITERAL
+    """
+    How the server interprets ``query`` (MygramDB v1.10+). ``LITERAL`` quotes
+    the text; ``BOOLEAN`` sends it verbatim so ``AND`` / ``OR`` / ``NOT`` and
+    parentheses are parsed as operators.
+    """
+
     sort_column: Optional[str] = None
     """
     Column name for sorting.
@@ -151,6 +238,10 @@ class CountOptions:
     and_terms: List[str] = field(default_factory=list)
     not_terms: List[str] = field(default_factory=list)
     filters: Dict[str, str] = field(default_factory=dict)
+    """Equality filters, ``column -> value``."""
+
+    filter_conditions: List[FilterCondition] = field(default_factory=list)
+    """Comparison filters with an explicit operator (MygramDB v1.9+)."""
 
 
 @dataclass
@@ -172,6 +263,14 @@ class DebugInfo:
     cache: Optional[str] = None
     cache_age_ms: Optional[float] = None
     cache_saved_ms: Optional[float] = None
+    #: Why a lookup missed (``not_found`` / ``invalidated``); ``None`` on a hit.
+    cache_reason: Optional[str] = None
+    #: Execution cost of the query that filled the entry, on a miss.
+    cache_cost_ms: Optional[float] = None
+    #: Canonical cache key, reported only while the cache is being debugged.
+    cache_key: Optional[str] = None
+    #: ``True`` when the response carried highlight snippets.
+    highlight: bool = False
     limit: Optional[int] = None
     offset: Optional[int] = None
 
@@ -229,6 +328,21 @@ class ServerInfo:
     doc_count: int = 0
     tables: List[str] = field(default_factory=list)
 
+    data_initialized: bool = False
+    """
+    Whether every configured table has finished its initial data load
+    (MygramDB v1.10+). ``False`` against an older server, which does not report
+    the field.
+    """
+
+    ready: bool = False
+    """
+    Whether the server is ready to serve traffic — evaluated from the same
+    inputs as the HTTP health endpoint, so a TCP-only deployment can gate
+    traffic without polling HTTP (MygramDB v1.10+). ``False`` against an older
+    server, which does not report the field.
+    """
+
 
 @dataclass
 class ReplicationStatus:
@@ -262,7 +376,12 @@ class DumpStatus:
 
 @dataclass
 class CacheStats:
-    """Cache statistics."""
+    """
+    Cache statistics reported by ``CACHE STATS``.
+
+    Fields a given server does not report keep their default, so this parses
+    both the current response and an older, shorter one.
+    """
 
     enabled: bool = False
     hits: int = 0
@@ -274,6 +393,34 @@ class CacheStats:
     max_memory_mb: float = 0.0
     current_memory_mb: float = 0.0
     ttl_seconds: int = 0
+    #: Lookups served, i.e. hits plus misses.
+    total_queries: int = 0
+    #: Memory held by the invalidation reverse indexes.
+    invalidation_index_memory_bytes: int = 0
+    #: Memory held by pending invalidations (MygramDB v1.10+).
+    invalidation_queue_memory_bytes: int = 0
+    #: Entry memory plus invalidation memory, i.e. what is charged to the budget.
+    accounted_memory_bytes: int = 0
+    #: Entries dropped because their TTL elapsed.
+    ttl_expirations: int = 0
+    #: Results not admitted to the cache, and the reason breakdown below.
+    rejection_count: int = 0
+    rejection_oversize: int = 0
+    rejection_memory_budget: int = 0
+    rejection_duplicate: int = 0
+    #: Entries dropped by a staleness check rather than eviction or TTL.
+    stale_entry_removals: int = 0
+    decompression_failures: int = 0
+    stale_lru_entries: int = 0
+    #: Invalidations applied inline, deferred to the worker, and batched.
+    invalidations_immediate: int = 0
+    invalidations_deferred: int = 0
+    invalidations_batches: int = 0
+    #: Mean latency of a served hit / a miss; ``None`` until one is recorded.
+    avg_cache_hit_time_ms: Optional[float] = None
+    avg_cache_miss_time_ms: Optional[float] = None
+    #: Execution time saved by hits over the server's lifetime.
+    total_time_saved_ms: float = 0.0
 
 
 @dataclass
@@ -299,8 +446,20 @@ class FacetOptions:
     and_terms: List[str] = field(default_factory=list)
     not_terms: List[str] = field(default_factory=list)
     filters: Dict[str, str] = field(default_factory=dict)
+    """Equality filters, ``column -> value``."""
+
+    filter_conditions: List[FilterCondition] = field(default_factory=list)
+    """Comparison filters with an explicit operator (MygramDB v1.9+)."""
+
     limit: int = 0
     """Maximum number of facet values to return (0 = no limit)."""
+
+    offset: int = 0
+    """
+    Number of distinct values to skip before the returned page
+    (MygramDB v1.9+). Pair with ``limit`` and :attr:`FacetResponse.total_count`
+    to paginate facet navigation.
+    """
 
 
 @dataclass
@@ -317,23 +476,41 @@ class FacetResponse:
 
     results: List[FacetValue] = field(default_factory=list)
 
+    total_count: int = 0
+    """
+    Distinct value count before OFFSET and LIMIT (MygramDB v1.9+), i.e. the
+    total a caller paginates through. ``len(results)`` is the size of the
+    returned page. Against an older server that reports only the page size,
+    this mirrors ``len(results)``.
+    """
+
 
 @dataclass
 class RetryPolicy:
     """
     Exponential backoff with full jitter for transient failures.
 
-    Only exceptions in ``retryable`` are retried. Server-side rejections
-    (``ServerError``), input errors (``InputValidationError``) and framing
-    errors (``ProtocolError``) are not retryable: resending cannot change the
-    outcome. Commands with side effects are the caller's responsibility — the
-    pool applies this only to its read-only delegation API.
+    Only exceptions in ``retryable`` are retried. A rejection that names a
+    request-shape fault (a plain ``ServerError``), input errors
+    (``InputValidationError``) and framing errors (``ProtocolError``) are not
+    retryable: resending cannot change the outcome. The two coded server states
+    that *can* clear on their own — ``ServerNotReadyError`` (loading / not
+    ready) and ``ServerBusyError`` (rate limited or a long operation holding the
+    table) — are retried by default, following the server's numeric error code
+    rather than its message text (MygramDB v1.10+). Commands with side effects
+    are the caller's responsibility — the pool applies this only to its
+    read-only delegation API.
     """
 
     max_attempts: int = 3
     base_delay: float = 0.05
     max_delay: float = 1.0
-    retryable: Tuple[Type[BaseException], ...] = (TimeoutError, ConnectionError)
+    retryable: Tuple[Type[BaseException], ...] = (
+        TimeoutError,
+        ConnectionError,
+        ServerNotReadyError,
+        ServerBusyError,
+    )
 
     def is_retryable(self, exc: BaseException) -> bool:
         return isinstance(exc, self.retryable)
