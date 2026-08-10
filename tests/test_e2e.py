@@ -6,6 +6,8 @@ Tests are skipped if the server is not available.
 """
 import asyncio
 import os
+import re
+from typing import Tuple
 
 import pytest
 
@@ -13,17 +15,25 @@ from mygramdb_client import (
     ClientConfig,
     CountOptions,
     FacetOptions,
+    FilterCondition,
+    FilterOp,
     HighlightOptions,
     MygramClient,
     MygramPool,
     PoolConfig,
+    QueryMode,
     RetryPolicy,
     SearchOptions,
     SearchRawOptions,
     convert_search_expression,
     simplify_search_expression,
 )
-from mygramdb_client.errors import ProtocolError, ServerError
+from mygramdb_client.errors import (
+    AuthenticationError,
+    ErrorCode,
+    ProtocolError,
+    ServerError,
+)
 
 # Server-side gating errors (e.g. HIGHLIGHT requires verify_text, FACET requires
 # a faceted column) surface as ServerError; legacy server builds emit raw
@@ -57,15 +67,27 @@ def e2e_config(**overrides) -> ClientConfig:
     )
 
 
-async def is_server_available() -> bool:
-    """Check if the MygramDB server is available."""
+async def probe_server() -> Tuple[bool, Tuple[int, int, int]]:
+    """
+    Reach the server once and report whether it answered, plus its version.
+
+    The version gates the blocks below that cover a version-specific surface,
+    so they skip against a server that predates it rather than fail. It is
+    compared as a tuple of integers, so 1.10.0 sorts above 1.9.0 rather than
+    below it as a string would.
+    """
     client = MygramClient(e2e_config(timeout=1.0))
     try:
         await client.connect()
+        info = await client.info()
         await client.disconnect()
-        return True
     except Exception:
-        return False
+        return False, (0, 0, 0)
+
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", info.version)
+    if not match:
+        return True, (0, 0, 0)
+    return True, (int(match[1]), int(match[2]), int(match[3]))
 
 
 @pytest.fixture
@@ -77,22 +99,25 @@ async def client():
     await client.disconnect()
 
 
-# Check server availability once at module load
-_server_available = None
+SERVER_AVAILABLE, SERVER_VERSION = asyncio.run(probe_server())
 
+IS_V19 = SERVER_VERSION >= (1, 9, 0)
+IS_V110 = SERVER_VERSION >= (1, 10, 0)
 
-def get_server_available():
-    global _server_available
-    if _server_available is None:
-        _server_available = asyncio.run(is_server_available())
-    return _server_available
-
-
-# Skip all tests if server is not available
+# Against an arbitrary developer machine an absent server is a reason to skip.
+# Under the docker harness it is a failure: that harness booted a server and
+# waited for its readiness probe, so an unreachable one means the client cannot
+# talk to it — and skipping the whole suite would still exit 0 and read as a
+# pass, which is how a broken connection stays invisible.
 pytestmark = pytest.mark.skipif(
-    not get_server_available(),
+    not SERVER_AVAILABLE and not SEEDED,
     reason="MygramDB server is not available"
 )
+
+
+def test_docker_harness_reaches_the_server():
+    """The harness booted a server, so failing to reach it is not a skip."""
+    assert SERVER_AVAILABLE
 
 
 class TestConnection:
@@ -827,5 +852,241 @@ class TestSeededDataset:
                 *[pool.search(self.TABLE, "python") for _ in range(8)]
             )
             assert all(self._ids(r) == ["3"] for r in batch)
+        finally:
+            await pool.close()
+
+
+@pytest.mark.skipif(
+    not SEEDED or not IS_V19,
+    reason="requires MYGRAM_E2E_SEEDED=1 (docker e2e) and a v1.9+ server",
+)
+class TestQuerySurfaceV19:
+    """
+    Query surface introduced in MygramDB v1.9, asserted against the fixed
+    dataset. See tests/docker/mysql-init/02-seed.sql for the statuses and
+    categories these depend on.
+    """
+
+    TABLE = "testdb.articles"
+
+    @staticmethod
+    def _ids(response) -> list:
+        return sorted(r.primary_key for r in response.results)
+
+    @staticmethod
+    def _order(response) -> list:
+        return [r.primary_key for r in response.results]
+
+    async def test_boolean_query_mode_evaluates_or(self, client):
+        res = await client.search(
+            self.TABLE, "ruby OR python",
+            SearchOptions(query_mode=QueryMode.BOOLEAN),
+        )
+        assert res.total_count == 2
+        assert self._ids(res) == ["2", "3"]
+
+    async def test_boolean_query_mode_evaluates_nested_group(self, client):
+        res = await client.search(
+            self.TABLE, "ruby AND (rails OR python)",
+            SearchOptions(query_mode=QueryMode.BOOLEAN),
+        )
+        assert res.total_count == 1
+        assert self._ids(res) == ["2"]
+
+    async def test_boolean_query_mode_combines_with_a_filter(self, client):
+        # The reason query_mode exists: search_raw takes an expression but no
+        # filters, so this combination was previously unreachable.
+        res = await client.search(
+            self.TABLE, "ruby OR python",
+            SearchOptions(
+                query_mode=QueryMode.BOOLEAN,
+                filters={"category": "science"},
+            ),
+        )
+        assert res.total_count == 1
+        assert self._ids(res) == ["3"]
+
+    async def test_literal_mode_matches_a_reserved_word_as_text(self, client):
+        # Same input without query_mode: quoted, so the server looks for the
+        # phrase "ruby OR python", which no document contains.
+        res = await client.search(self.TABLE, "ruby OR python")
+        assert res.total_count == 0
+
+    async def test_filters_with_a_greater_than_comparison(self, client):
+        # 機械学習 matches ids 1 (status 1) and 5 (status 3).
+        res = await client.search(
+            self.TABLE, "機械学習",
+            SearchOptions(filter_conditions=[
+                FilterCondition("status", "1", FilterOp.GT),
+            ]),
+        )
+        assert res.total_count == 1
+        assert self._ids(res) == ["5"]
+
+    async def test_filters_with_a_not_equal_comparison(self, client):
+        res = await client.search(
+            self.TABLE, "機械学習",
+            SearchOptions(filter_conditions=[
+                FilterCondition("category", "tech", FilterOp.NE),
+            ]),
+        )
+        assert res.total_count == 1
+        assert self._ids(res) == ["5"]
+
+    async def test_filters_a_range_through_two_conditions_on_one_column(self, client):
+        # A list of conditions is what makes two predicates on one column
+        # expressible; the equality dict holds a single value per column.
+        res = await client.search(
+            self.TABLE, "機械学習",
+            SearchOptions(filter_conditions=[
+                FilterCondition("status", "1", FilterOp.GTE),
+                FilterCondition("status", "2", FilterOp.LTE),
+            ]),
+        )
+        assert res.total_count == 1
+        assert self._ids(res) == ["1"]
+
+    async def test_bare_filter_dict_is_treated_as_equality(self, client):
+        res = await client.search(
+            self.TABLE, "機械学習", SearchOptions(filters={"status": "3"}),
+        )
+        assert self._ids(res) == ["5"]
+
+    async def test_comparison_filter_applies_to_count(self, client):
+        res = await client.count(
+            self.TABLE, "機械学習",
+            CountOptions(filter_conditions=[
+                FilterCondition("status", "1", FilterOp.GT),
+            ]),
+        )
+        assert res.count == 1
+
+    async def test_facet_reports_the_distinct_total_beside_a_limited_page(self, client):
+        resp = await client.facet(self.TABLE, "category", FacetOptions(limit=1))
+        assert len(resp.results) == 1
+        assert resp.total_count == 2
+
+    async def test_facet_pages_through_values_with_offset(self, client):
+        first = await client.facet(self.TABLE, "category", FacetOptions(limit=1))
+        second = await client.facet(
+            self.TABLE, "category", FacetOptions(limit=1, offset=1),
+        )
+        assert len(second.results) == 1
+        assert second.total_count == 2
+        assert second.results[0].value != first.results[0].value
+
+        paged = sorted([first.results[0].value, second.results[0].value])
+        assert paged == ["science", "tech"]
+
+    async def test_orders_by_ascending_primary_key_when_sort_desc_is_false(self, client):
+        # Descending is the server default, so ascending has to be requested
+        # explicitly — the clause used to be dropped without a sort_column.
+        ascending = await client.search(
+            self.TABLE, "機械学習", SearchOptions(sort_desc=False),
+        )
+        descending = await client.search(
+            self.TABLE, "機械学習", SearchOptions(sort_desc=True),
+        )
+        assert self._order(ascending) == ["1", "5"]
+        assert self._order(descending) == ["5", "1"]
+
+
+@pytest.mark.skipif(not IS_V110, reason="requires a v1.10+ server")
+class TestProtocolSurfaceV110:
+    """Protocol surface introduced in MygramDB v1.10."""
+
+    async def test_info_reports_readiness(self, client):
+        info = await client.info()
+        assert info.data_initialized is True
+        assert info.ready is True
+
+    async def test_unknown_table_carries_a_typed_error_code(self, client):
+        with pytest.raises(ServerError) as excinfo:
+            await client.search("no_such_table", "python")
+
+        assert excinfo.value.error_code == ErrorCode.TABLE_NOT_FOUND
+        # The message holds the human-readable remainder, without the code.
+        assert not re.match(r"^\d+\s", excinfo.value.message)
+
+    async def test_reports_the_replication_diagnostics_fields(self, client):
+        status = await client.get_replication_status()
+
+        assert isinstance(status.state, str)
+        assert status.state != ""
+        assert isinstance(status.crc_errors, int)
+        assert isinstance(status.schema_incompatible, bool)
+        assert isinstance(status.last_error_code, int)
+        assert isinstance(status.last_error, str)
+        assert isinstance(status.last_applied_unixtime, int)
+        # Stamped where the replication position advances, so it measures
+        # progress rather than connectivity. The server sends -1 until an event
+        # has been applied, which is the state of a freshly seeded stack.
+        assert isinstance(status.seconds_since_last_applied, int)
+
+
+@pytest.mark.skipif(
+    not IS_V110 or not TEST_ADMIN_TOKEN,
+    reason="requires a v1.10+ server started with an admin token",
+)
+class TestAdministrativeAuthentication:
+    """
+    A server whose TCP listener is not loopback-only gates administrative
+    commands behind ``AUTH`` from v1.10. Ordinary query traffic stays open.
+    """
+
+    @staticmethod
+    def _unauthenticated() -> MygramClient:
+        """A client deliberately built without a token."""
+        return MygramClient(ClientConfig(host=TEST_HOST, port=TEST_PORT, timeout=5.0))
+
+    async def test_serves_ordinary_search_traffic_without_a_token(self):
+        client = self._unauthenticated()
+        await client.connect()
+        try:
+            res = await client.search("testdb.articles", "python")
+            assert isinstance(res.total_count, int)
+        finally:
+            await client.disconnect()
+
+    async def test_refuses_an_administrative_command_without_a_token(self):
+        client = self._unauthenticated()
+        await client.connect()
+        try:
+            with pytest.raises(AuthenticationError) as excinfo:
+                await client.cache_stats()
+            assert excinfo.value.error_code == ErrorCode.PERMISSION_DENIED
+        finally:
+            await client.disconnect()
+
+    async def test_authenticate_upgrades_an_already_open_connection(self):
+        client = self._unauthenticated()
+        await client.connect()
+        try:
+            await client.authenticate(TEST_ADMIN_TOKEN)
+            stats = await client.cache_stats()
+            assert isinstance(stats.hits, int)
+        finally:
+            await client.disconnect()
+
+    async def test_wrong_token_fails_connect_rather_than_half_opening(self):
+        client = MygramClient(ClientConfig(
+            host=TEST_HOST, port=TEST_PORT, timeout=5.0, admin_token="wrong",
+        ))
+        with pytest.raises(AuthenticationError):
+            await client.connect()
+        assert client.is_connected() is False
+
+    async def test_every_pooled_connection_authenticates(self):
+        pool = MygramPool(
+            e2e_config(),
+            PoolConfig(min_connections=2, max_connections=2),
+        )
+        await pool.open()
+        try:
+            # An administrative command over a pooled connection only succeeds
+            # if that connection authenticated as it opened.
+            async with pool.acquire() as pooled:
+                stats = await pooled.cache_stats()
+            assert isinstance(stats.hits, int)
         finally:
             await pool.close()
