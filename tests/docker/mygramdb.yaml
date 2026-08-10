@@ -18,8 +18,10 @@ tables:
     text_source:
       column: "content"
     required_filters:
+      # The column is TINYINT in the seed schema. From v1.9 the configured type
+      # must match what MySQL reports, so "int" no longer starts.
       - name: "enabled"
-        type: "int"
+        type: "tinyint"
         op: "="
         value: 1
         bitmap_index: false
@@ -36,8 +38,10 @@ tables:
     text_source:
       column: "description"
     required_filters:
+      # The column is TINYINT in the seed schema. From v1.9 the configured type
+      # must match what MySQL reports, so "int" no longer starts.
       - name: "enabled"
-        type: "int"
+        type: "tinyint"
         op: "="
         value: 1
         bitmap_index: false
@@ -57,6 +61,9 @@ replication:
   enable: true
   server_id: 99001
   start_from: "snapshot"
+  # Build the index at startup. Without it the server comes up empty and stays
+  # not_ready until a client sends SYNC, which the compose healthcheck waits on.
+  auto_initial_snapshot: true
 
 memory:
   hard_limit_mb: 256
@@ -75,28 +82,30 @@ dump:
   interval_sec: 0
 
 api:
-  # Required from v1.10 whenever the TCP listener is not loopback-only and no
-  # Unix socket is configured. This is a throwaway stack whose ports are
-  # published on 127.0.0.1 only; a real deployment must not carry its token in
-  # a committed file.
-  admin_token: "e2e_admin_token"
   tcp:
     bind: "0.0.0.0"
     port: 11016
+  # admin_token is deliberately absent: docker-compose.yml supplies it through
+  # MYGRAM_API_ADMIN_TOKEN, which takes priority over this file. v1.10 requires
+  # one for a non-loopback bind, and older servers ignore the variable, so the
+  # same config works across every image the suite runs against.
   http:
     enable: true
     bind: "0.0.0.0"
     port: 8080
 
 network:
-  # From v1.10 a non-loopback bind with an open CIDR list is rejected while the
-  # configuration is parsed. Docker rewrites a published-port connection's
-  # source to the bridge gateway, so the list has to cover the bridge range as
-  # well as loopback (the container's own health probe). Keeping the published
-  # ports on 127.0.0.1 is what actually confines the stack to this host.
+  # v1.10 rejects a universal allow list when the API binds 0.0.0.0, so this names
+  # the private ranges instead. A connection from the host arrives with the source
+  # address of whatever gateway fronts the container — the compose bridge on Linux
+  # (172.16/12), the Docker Desktop VM gateway on macOS (192.168.65.1) — and the
+  # container's own health probe comes from loopback. Publishing the ports on
+  # 127.0.0.1 is what actually confines the stack to this host.
   allow_cidrs:
     - "127.0.0.1/32"
+    - "10.0.0.0/8"
     - "172.16.0.0/12"
+    - "192.168.0.0/16"
 
 logging:
   level: "info"
