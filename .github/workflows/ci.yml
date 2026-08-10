@@ -20,17 +20,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - run: pip install flake8
-      - run: flake8 src tests --max-line-length=100
+      - run: flake8 src tests
 
   typecheck:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - run: pip install mypy
@@ -44,15 +44,15 @@ jobs:
         python-version: ['3.9', '3.14']
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install -e ".[dev]" || pip install -e . && pip install pytest pytest-asyncio pytest-cov
+      - run: pip install -e . pytest pytest-asyncio pytest-cov
       - name: Run tests with coverage
         run: pytest tests/ --ignore=tests/test_e2e.py --cov=mygramdb_client --cov-report=xml -q
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
