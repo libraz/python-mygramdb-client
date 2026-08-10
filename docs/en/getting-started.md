@@ -257,8 +257,25 @@ Two wire-protocol behaviors matter when targeting a MygramDB v1.8 server:
   only tab-less `#` lines in the FACET response are treated as comments, so a
   legitimate `#tag`-style value (which carries a tab before its count) is kept.
 
-MygramDB v1.7 (multi-database, `search_raw`, runtime variables, on-demand sync)
-and v1.6 (fuzzy search, highlight, facets, BM25) remain supported.
+## MygramDB v1.10 Notes
+
+Two server changes need attention when upgrading a deployment:
+
+- **Administrative commands require a token.** If the server's TCP listener is
+  not loopback-only, set `ClientConfig.admin_token`. The client then issues
+  `AUTH` on connect and on every transparent reconnect; without it,
+  administrative commands fail with `AuthenticationError`. The TCP transport
+  does not encrypt the token, so keep that listener on a trusted network or
+  behind a terminating proxy.
+- **Errors carry a numeric code.** Branch on `ServerError.error_code` (see
+  `ErrorCode`) rather than matching message text. `ServerNotReadyError` and
+  `ServerBusyError` mark states that a retry may clear, and `RetryPolicy`
+  retries them by default.
+
+MygramDB v1.9 (facet pagination via `FacetOptions.offset` /
+`FacetResponse.total_count`, and comparison filters via `filter_conditions`),
+v1.7 (multi-database, `search_raw`, runtime variables, on-demand sync) and v1.6
+(fuzzy search, highlight, facets, BM25) remain supported.
 
 ## Next Steps
 

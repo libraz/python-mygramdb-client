@@ -50,6 +50,11 @@ with `PoolExhaustedError` instead of queueing without bound.
 > Pooled connections are managed with `auto_reconnect` enabled, so a connection
 > that drops between uses heals itself on the next command.
 
+From v1.9 the server reaps its own idle connections (`idle_timeout_sec`). The
+pool's `idle_health_check_interval` (30s by default) probes a connection that
+has been idle at least that long and replaces a reaped one before hand-out, so
+keep it below the server's timeout.
+
 ## Context Manager Pattern
 
 Use async context manager for automatic resource cleanup:
@@ -182,10 +187,14 @@ async def main():
 
 Attach a `RetryPolicy` to the pool to retry transient failures on the pool's
 read-only delegation API (`search` / `count` / `get` / `facet` / `info`). It
-uses exponential backoff with full jitter and only retries connection/timeout
-errors — server rejections (`ServerError`), input errors
-(`InputValidationError`) and framing errors (`ProtocolError`) are not retried,
-since resending cannot change the outcome.
+uses exponential backoff with full jitter and retries connection/timeout errors
+plus the two coded server states that can clear on their own —
+`ServerNotReadyError` (loading / not ready) and `ServerBusyError` (rate limited,
+or a long operation holding the table), both classified from the server's
+numeric error code rather than its message text (v1.10+). Other server
+rejections (a plain `ServerError`), input errors (`InputValidationError`) and
+framing errors (`ProtocolError`) are not retried, since resending cannot change
+the outcome.
 
 ```python
 from mygramdb_client import MygramPool, ClientConfig, PoolConfig, RetryPolicy
@@ -499,6 +508,28 @@ results = await client.search('articles', 'test')
 them whether you import the library names or use the builtins. On Python 3.11+,
 `except asyncio.TimeoutError` catches `TimeoutError` as well.
 
+Branch on the server's numeric error code rather than its message (v1.10+) —
+messages are free to change, codes are the protocol contract:
+
+```python
+from mygramdb_client import (
+    ErrorCode, ServerError, ServerBusyError, ServerNotReadyError,
+)
+
+try:
+    results = await client.search('articles', 'test')
+except (ServerNotReadyError, ServerBusyError):
+    # Temporary server state; the same request may succeed later.
+    pass
+except ServerError as exc:
+    if exc.error_code == ErrorCode.TABLE_NOT_FOUND:
+        ...          # a configuration problem, not something to retry
+    raise
+```
+
+Against a pre-v1.10 server the frame is untyped and `error_code` is `None`, so
+keep a fallback path if you must support both.
+
 ### 3. Use Appropriate Timeouts
 
 ```python
@@ -512,15 +543,32 @@ client = MygramClient(ClientConfig(timeout=0.1))
 client = MygramClient(ClientConfig(timeout=60.0))
 ```
 
-Split the connect deadline from the per-command read deadline when a fast
-connect must coexist with heavier queries:
+Split the connect deadline from the per-command deadline when a fast connect
+must coexist with heavier queries:
 
 ```python
 # Fail a connect attempt quickly, but allow a heavy query more time.
 client = MygramClient(ClientConfig(connect_timeout=0.5, command_timeout=10.0))
 ```
 
-### 4. Monitor Performance
+`command_timeout` bounds the whole response, not each socket read, so a server
+that trickles bytes cannot hold a command open past the deadline.
+
+### 4. Set the Admin Token Once (v1.10+)
+
+A MygramDB v1.10 server whose TCP listener is not loopback-only rejects
+administrative commands until the connection has authenticated. Put the token on
+the config rather than calling `authenticate()` by hand — the config path also
+re-authenticates after a transparent reconnect, so a dropped connection does not
+silently lose administrative access mid-session:
+
+```python
+config = ClientConfig(host='localhost', admin_token='...', auto_reconnect=True)
+async with MygramClient(config) as client:
+    await client.optimize('articles')
+```
+
+### 5. Monitor Performance
 
 ```python
 # Good - track query performance
@@ -528,7 +576,7 @@ monitor = PerformanceMonitor()
 await monitor.monitored_search(client, 'articles', 'test')
 ```
 
-### 5. Clean Up Resources
+### 6. Clean Up Resources
 
 ```python
 # Good - use context manager

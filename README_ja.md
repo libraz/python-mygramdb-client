@@ -9,7 +9,7 @@
 
 [MygramDB](https://github.com/libraz/mygram-db/) 用の Python クライアントライブラリ — MySQL レプリケーションをサポートする高性能インメモリ全文検索エンジン。
 
-> **MygramDB v1.8** 対応（引用符なしのブール式送信、FACET の `#` 値の保持）。v1.7 機能（マルチデータベース、ブール検索 `search_raw`、ランタイム変数、オンデマンド同期）および v1.6 機能（ファジー検索、ハイライト、ファセット、BM25）も継続サポート。
+> **MygramDB v1.10** 対応（管理者 `AUTH`、数値エラーコード、TCP でのレディネス、ブールクエリモード）および **v1.9** 対応（ファセットのページネーション、比較フィルタ）。v1.8 機能（引用符なしのブール式送信）、v1.7 機能（マルチデータベース、ブール検索 `search_raw`、ランタイム変数、オンデマンド同期）、v1.6 機能（ファジー検索、ハイライト、ファセット、BM25）も継続サポート。
 
 ## 概要
 
@@ -27,7 +27,8 @@ MygramDB は MySQL FULLTEXT の **25〜200倍高速** な全文検索を提供�
 - **外部依存ゼロ** — 標準ライブラリのみ
 - **Async/Await API** — コンテキストマネージャ対応のモダンな asyncio ベースインターフェース
 - **コネクションプール** — 高スループット用途向けの組み込み `MygramPool`（コマンド単位のリトライ、サーキットブレーカー、観測フック付き）
-- **堅牢なトランスポート** — 自動再接続、connect/command 別々のタイムアウト、TCP キープアライブ
+- **堅牢なトランスポート** — 自動再接続（再認証付き）、コマンド全体で 1 つのデッドライン、レスポンスフレームの上限、TCP キープアライブ
+- **型付きエラー** — サーバーの数値エラーコードを個別の例外にデコードするため、リトライ判定がメッセージ文字列に依存しない
 - **検索式パーサー** — Web スタイルの検索構文（+必須、-除外、"フレーズ"、OR、グループ化）
 - **完全なプロトコルサポート** — すべての MygramDB コマンド（SEARCH、COUNT、GET、INFO、CACHE、DUMP、OPTIMIZE など）
 - **型安全性** — dataclass による完全な型ヒント。PEP 561 の `py.typed` マーカーを同梱
@@ -183,6 +184,103 @@ res = await client.search_raw('articles', raw, SearchRawOptions(limit=50))
 
 # '#hashtag' 形式のファセット値は保持されます
 facets = await client.facet('articles', 'tags')
+```
+
+## MygramDB v1.9 機能
+
+### ファセットのページネーション
+
+`facet()` が `offset` を受け取るようになり、レスポンスは distinct 値が全体で
+いくつあるかを返します。ファセットナビゲーションのページ送りに必要な情報が
+そろいます。
+
+```python
+page = await client.facet('articles', 'category',
+    FacetOptions(limit=20, offset=40))
+print(f'{len(page.results)} / {page.total_count} 件のカテゴリ')
+```
+
+### 比較フィルタ
+
+`filters` は等価比較を扱います。範囲や不一致の条件には `filter_conditions` を
+渡してください。
+
+```python
+from mygramdb_client import FilterCondition, FilterOp
+
+result = await client.search('articles', 'python', SearchOptions(
+    filters={'lang': 'ja'},                               # FILTER lang = ja
+    filter_conditions=[
+        FilterCondition('views', '100', FilterOp.GTE),    # FILTER views >= 100
+        FilterCondition('status', 'draft', FilterOp.NE),  # FILTER status != draft
+    ],
+))
+```
+
+## MygramDB v1.10 機能
+
+### 管理者認証
+
+v1.10 以降、TCP リスナーがループバック限定でないサーバーは管理トークンを要求
+します。設定に一度書いておけば、接続時と透過的な再接続時にクライアントが自動で
+認証します。
+
+```python
+config = ClientConfig(host='localhost', admin_token='...', auto_reconnect=True)
+async with MygramClient(config) as client:
+    await client.optimize('articles')   # 管理コマンド。すでに認証済み
+```
+
+TCP 経路はトークンを暗号化しません。そのリスナーは信頼できるネットワーク内か、
+TLS を終端するプロキシの背後に置いてください。
+
+### 型付きエラーコード
+
+すべての `ERROR` フレームが数値コードを持つようになったため、リトライや
+フェイルオーバーの判定をメッセージの文字列一致ではなくコードで分岐できます。
+
+```python
+from mygramdb_client import ErrorCode, ServerError, ServerNotReadyError
+
+try:
+    await client.search('articles', 'python')
+except ServerNotReadyError:
+    ...                      # ロード中。リトライで成功しうる
+except ServerError as exc:
+    if exc.error_code == ErrorCode.TABLE_NOT_FOUND:
+        ...                  # リトライしても解決しない
+```
+
+`RetryPolicy` は既定でこれを利用し、`ServerNotReadyError` と `ServerBusyError`
+はリトライ、それ以外のサーバー拒否はリトライしません。
+
+### TCP 経由のレディネス
+
+`INFO` がレディネスを返すため、TCP のみの構成でも HTTP のヘルスエンドポイントを
+ポーリングせずにトラフィックを制御できます。
+
+```python
+info = await client.info()
+if not (info.data_initialized and info.ready):
+    ...
+```
+
+### ブールクエリモード
+
+`search_raw()` は式を送れますが、ページネーションとハイライトのオプションしか
+受け取れません。ブールクエリモードなら、式と型付きオプション一式を組み合わせ
+られます。
+
+```python
+from mygramdb_client import QueryMode
+
+result = await client.search('articles', 'python AND (django OR flask)',
+    SearchOptions(
+        query_mode=QueryMode.BOOLEAN,
+        filters={'lang': 'ja'},
+        sort_column='_score',
+        highlight=HighlightOptions(),
+    ))
 ```
 
 ## 高スループット: コネクションプール

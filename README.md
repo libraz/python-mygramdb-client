@@ -9,9 +9,11 @@
 
 Python client library for [MygramDB](https://github.com/libraz/mygram-db/) — a high-performance in-memory full-text search engine with MySQL replication support.
 
-> Compatible with **MygramDB v1.8** (verbatim boolean transport, FACET `#`-value
-> preservation). v1.7 (multi-database, `search_raw`, runtime variables, on-demand
-> sync) and v1.6 (fuzzy search, highlight, facets, BM25) remain supported.
+> Compatible with **MygramDB v1.10** (admin `AUTH`, numeric error codes, TCP
+> readiness, boolean query mode) and **v1.9** (facet pagination, comparison
+> filters). v1.8 (verbatim boolean transport), v1.7 (multi-database,
+> `search_raw`, runtime variables, on-demand sync) and v1.6 (fuzzy search,
+> highlight, facets, BM25) remain supported.
 
 ## Overview
 
@@ -29,7 +31,8 @@ MygramDB provides **25-200x faster** full-text search than MySQL FULLTEXT. This 
 - **Zero Dependencies** — Standard library only
 - **Async/Await API** — Modern asyncio-based interface with context manager support
 - **Connection Pooling** — Built-in `MygramPool` for high-throughput workloads, with per-command retry, circuit breaker, and observability hooks
-- **Resilient Transport** — Auto-reconnect, separate connect/command timeouts, and TCP keepalive
+- **Resilient Transport** — Auto-reconnect (with re-authentication), one total command deadline, response frame cap, and TCP keepalive
+- **Typed Errors** — Numeric server error codes decoded into specific exceptions, so retry decisions never depend on message text
 - **Search Expression Parser** — Web-style search syntax (+required, -excluded, "phrase", OR, grouping)
 - **Full Protocol Support** — All MygramDB commands (SEARCH, COUNT, GET, INFO, CACHE, DUMP, OPTIMIZE, etc.)
 - **Type Safety** — Full type hints with dataclasses, shipped with a PEP 561 `py.typed` marker
@@ -184,6 +187,102 @@ res = await client.search_raw('articles', raw, SearchRawOptions(limit=50))
 
 # '#hashtag'-style facet values are retained
 facets = await client.facet('articles', 'tags')
+```
+
+## MygramDB v1.9 Features
+
+### Facet pagination
+
+`facet()` takes an `offset`, and the response reports how many distinct values
+exist in total — enough to paginate facet navigation.
+
+```python
+page = await client.facet('articles', 'category',
+    FacetOptions(limit=20, offset=40))
+print(f'{len(page.results)} of {page.total_count} categories')
+```
+
+### Comparison filters
+
+`filters` covers equality. For range and inequality predicates, pass
+`filter_conditions`:
+
+```python
+from mygramdb_client import FilterCondition, FilterOp
+
+result = await client.search('articles', 'python', SearchOptions(
+    filters={'lang': 'en'},                               # FILTER lang = en
+    filter_conditions=[
+        FilterCondition('views', '100', FilterOp.GTE),    # FILTER views >= 100
+        FilterCondition('status', 'draft', FilterOp.NE),  # FILTER status != draft
+    ],
+))
+```
+
+## MygramDB v1.10 Features
+
+### Administrative authentication
+
+From v1.10 a server whose TCP listener is not loopback-only requires an admin
+token. Set it once on the config and the client authenticates on connect and on
+every transparent reconnect:
+
+```python
+config = ClientConfig(host='localhost', admin_token='...', auto_reconnect=True)
+async with MygramClient(config) as client:
+    await client.optimize('articles')   # administrative command, already authed
+```
+
+The TCP transport does not encrypt the token — keep that listener on a trusted
+network or behind a terminating proxy.
+
+### Typed error codes
+
+Every `ERROR` frame now carries a numeric code, so retry and failover decisions
+branch on the code instead of matching message text:
+
+```python
+from mygramdb_client import ErrorCode, ServerError, ServerNotReadyError
+
+try:
+    await client.search('articles', 'python')
+except ServerNotReadyError:
+    ...                      # still loading; retrying may succeed
+except ServerError as exc:
+    if exc.error_code == ErrorCode.TABLE_NOT_FOUND:
+        ...                  # retrying cannot help
+```
+
+`RetryPolicy` uses this by default: `ServerNotReadyError` and `ServerBusyError`
+are retried, other server rejections are not.
+
+### Readiness over TCP
+
+`INFO` reports readiness, so a TCP-only deployment can gate traffic without
+polling the HTTP health endpoint:
+
+```python
+info = await client.info()
+if not (info.data_initialized and info.ready):
+    ...
+```
+
+### Boolean query mode
+
+`search_raw()` sends an expression but takes only pagination and highlight
+options. Boolean query mode combines an expression with the full typed option
+set:
+
+```python
+from mygramdb_client import QueryMode
+
+result = await client.search('articles', 'python AND (django OR flask)',
+    SearchOptions(
+        query_mode=QueryMode.BOOLEAN,
+        filters={'lang': 'en'},
+        sort_column='_score',
+        highlight=HighlightOptions(),
+    ))
 ```
 
 ## High-throughput: Connection Pooling

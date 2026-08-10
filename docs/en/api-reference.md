@@ -25,11 +25,28 @@ Creates a new MygramDB client instance.
 async def connect() -> None
 ```
 
-Connect to MygramDB server.
+Connect to MygramDB server. When `ClientConfig.admin_token` is set, `AUTH` is
+issued on the fresh connection before it is handed back (v1.10+).
 
 **Raises:**
 - `ConnectionError` - If connection fails
 - `TimeoutError` - If connection times out
+- `AuthenticationError` - If the configured admin token is rejected
+
+#### authenticate() (v1.10+)
+
+```python
+async def authenticate(token: str) -> None
+```
+
+Authenticate this connection for administrative commands. Only needed for an
+ad-hoc token — setting `ClientConfig.admin_token` authenticates automatically on
+connect and on every transparent reconnect, which is what a long-lived client
+wants.
+
+**Raises:**
+- `AuthenticationError` - If the server rejects the token
+- `ProtocolError` - If the reply is not an `AUTH` acknowledgement
 
 #### disconnect()
 
@@ -61,13 +78,16 @@ async def search(
 
 Search for documents in a table. Multi-word queries are quoted automatically so
 they reach the server as a single phrase token; use
-[`search_raw()`](#search_raw) for boolean `AND`/`OR`/`NOT`/grouping expressions.
+[`search_raw()`](#search_raw) for boolean `AND`/`OR`/`NOT`/grouping expressions,
+or set `options.query_mode = QueryMode.BOOLEAN` (v1.10+) to combine such an
+expression with filters, sorting, fuzzy matching and highlighting in one call.
 
 **Parameters:**
 - `table` - Table name to search in. In a MygramDB v1.7+ multi-database
   deployment, pass a `database.table` identity (e.g. `app_db.articles`); a bare
   name still works for single-database servers.
-- `query` - Search query text
+- `query` - Search query text, or a boolean expression when
+  `options.query_mode` is `QueryMode.BOOLEAN`
 - `options` - Optional search options
 
 **Returns:** `SearchResponse` containing results and total count.
@@ -168,9 +188,10 @@ refinements).
 - `table` - Table name (bare or `database.table`)
 - `column` - Filter column to aggregate
 - `options` - Optional `FacetOptions` (`query`, `and_terms`, `not_terms`,
-  `filters`, `limit`)
+  `filters`, `filter_conditions`, `limit`, `offset`)
 
-**Returns:** `FacetResponse` containing facet values and counts.
+**Returns:** `FacetResponse` containing the requested page of facet values and,
+from v1.9, the total distinct value count in `total_count`.
 
 #### info()
 
@@ -180,7 +201,8 @@ async def info() -> ServerInfo
 
 Get server information.
 
-**Returns:** `ServerInfo` with version, uptime, statistics.
+**Returns:** `ServerInfo` with version, uptime, statistics, and — from v1.10 —
+`data_initialized` and `ready`.
 
 #### get_config()
 
@@ -475,7 +497,9 @@ class ClientConfig:
     socket_path: str = ""                     # Unix socket path (overrides host/port when set)
     timeout: float = 5.0                      # Fallback for connect/command timeouts
     connect_timeout: Optional[float] = None   # Connection deadline (None -> timeout)
-    command_timeout: Optional[float] = None   # Per-response read deadline (None -> timeout)
+    command_timeout: Optional[float] = None   # Total response deadline (None -> timeout)
+    max_response_bytes: int = 64 * 1024 * 1024  # Cap on one response frame (0 = unbounded)
+    admin_token: str = ""                     # Sent as AUTH after connect/reconnect (v1.10+)
     recv_buffer_size: int = 65536
     max_query_length: int = 128
     auto_reconnect: bool = False              # Reconnect+resend if the socket died before the write
@@ -487,6 +511,16 @@ class ClientConfig:
 is written; a drop *after* the write is surfaced as `ConnectionError` without
 resending, so a possibly-applied command is never silently repeated.
 
+`command_timeout` is one deadline for the whole response, not a timer restarted
+by each socket read, so a server that trickles bytes cannot hold a command open
+indefinitely. A response that grows past `max_response_bytes` raises
+`ProtocolError` and drops the connection — the rest of the oversized frame is
+still in flight, so the socket cannot be reused.
+
+`admin_token` is required from v1.10 whenever the server's TCP listener is not
+loopback-only. The TCP transport does not encrypt it; keep that listener on a
+trusted network or behind a terminating proxy.
+
 ### SearchOptions
 
 ```python
@@ -496,12 +530,59 @@ class SearchOptions:
     offset: int = 0
     and_terms: List[str] = field(default_factory=list)
     not_terms: List[str] = field(default_factory=list)
-    filters: Dict[str, str] = field(default_factory=dict)
+    filters: Dict[str, str] = field(default_factory=dict)          # equality filters
+    filter_conditions: List[FilterCondition] = field(default_factory=list)  # comparison filters (v1.9+)
+    query_mode: QueryMode = QueryMode.LITERAL     # BOOLEAN parses AND/OR/NOT (v1.10+)
     sort_column: Optional[str] = None             # "_score" for BM25 relevance (v1.6+); None = primary key
     sort_desc: bool = True
     fuzzy: int = 0                                # Levenshtein distance 0/1/2 (v1.6+)
     highlight: Optional[HighlightOptions] = None  # enable HIGHLIGHT when set (v1.6+)
 ```
+
+`filters` are emitted before `filter_conditions`; both use the same wire shape
+`FILTER <column> <op> <value>`.
+
+With no `sort_column` the server orders by primary key descending, so only
+`sort_desc=False` adds a clause (`SORT ASC`).
+
+### QueryMode (v1.10+)
+
+```python
+class QueryMode(str, Enum):
+    LITERAL = "literal"   # default: query text is quoted and matched literally
+    BOOLEAN = "boolean"   # query text is sent verbatim and parsed as an expression
+```
+
+`BOOLEAN` combines a boolean expression with the typed option set (filters,
+sorting, fuzzy matching, highlighting) — something `search_raw()` cannot
+express. `LITERAL` is the default on every surface, so `alpha AND beta` does not
+change meaning when an application moves between TCP, HTTP, and the typed
+clients.
+
+### FilterOp (v1.9+)
+
+```python
+class FilterOp(str, Enum):
+    EQ = "="
+    NE = "!="
+    GT = ">"
+    GTE = ">="
+    LT = "<"
+    LTE = "<="
+```
+
+### FilterCondition (v1.9+)
+
+```python
+@dataclass
+class FilterCondition:
+    column: str
+    value: str
+    op: FilterOp = FilterOp.EQ
+```
+
+A single comparison filter. `column` is sent unquoted and validated as an
+identifier; `value` is quoted when it contains whitespace or quote characters.
 
 ### HighlightOptions (v1.6+)
 
@@ -534,6 +615,7 @@ class CountOptions:
     and_terms: List[str] = field(default_factory=list)
     not_terms: List[str] = field(default_factory=list)
     filters: Dict[str, str] = field(default_factory=dict)
+    filter_conditions: List[FilterCondition] = field(default_factory=list)  # v1.9+
 ```
 
 ### FacetOptions (v1.6+)
@@ -545,7 +627,9 @@ class FacetOptions:
     and_terms: List[str] = field(default_factory=list)
     not_terms: List[str] = field(default_factory=list)
     filters: Dict[str, str] = field(default_factory=dict)
+    filter_conditions: List[FilterCondition] = field(default_factory=list)  # v1.9+
     limit: int = 0                                       # max facet values (0 = no limit)
+    offset: int = 0                                      # distinct values to skip (v1.9+)
 ```
 
 ### SearchResponse
@@ -592,7 +676,12 @@ class FacetValue:
 @dataclass
 class FacetResponse:
     results: List[FacetValue] = field(default_factory=list)
+    total_count: int = 0   # distinct values before OFFSET/LIMIT (v1.9+)
 ```
+
+`results` is the returned page; `total_count` is how many distinct values exist
+in total. Against a pre-v1.9 server, which reports only the page size,
+`total_count` mirrors `len(results)`.
 
 ### Document
 
@@ -615,7 +704,13 @@ class ServerInfo:
     index_size_bytes: int = 0
     doc_count: int = 0
     tables: List[str] = field(default_factory=list)
+    data_initialized: bool = False  # every table finished its initial load (v1.10+)
+    ready: bool = False             # ready to serve traffic (v1.10+)
 ```
+
+`data_initialized` and `ready` come from the same inputs as the HTTP health
+endpoint, so a TCP-only deployment can gate traffic without polling HTTP. Both
+read `False` against a pre-v1.10 server, which does not report them.
 
 ### ReplicationStatus
 
@@ -661,7 +756,28 @@ class CacheStats:
     max_memory_mb: float = 0.0
     current_memory_mb: float = 0.0
     ttl_seconds: int = 0
+    total_queries: int = 0
+    invalidation_index_memory_bytes: int = 0
+    invalidation_queue_memory_bytes: int = 0
+    accounted_memory_bytes: int = 0
+    ttl_expirations: int = 0
+    rejection_count: int = 0
+    rejection_oversize: int = 0
+    rejection_memory_budget: int = 0
+    rejection_duplicate: int = 0
+    stale_entry_removals: int = 0
+    decompression_failures: int = 0
+    stale_lru_entries: int = 0
+    invalidations_immediate: int = 0
+    invalidations_deferred: int = 0
+    invalidations_batches: int = 0
+    avg_cache_hit_time_ms: Optional[float] = None
+    avg_cache_miss_time_ms: Optional[float] = None
+    total_time_saved_ms: float = 0.0
 ```
+
+A field the server does not report keeps its default, so the same dataclass
+covers an older server's shorter response.
 
 ### DebugInfo
 
@@ -683,6 +799,10 @@ class DebugInfo:
     cache: Optional[str] = None
     cache_age_ms: Optional[float] = None
     cache_saved_ms: Optional[float] = None
+    cache_reason: Optional[str] = None
+    cache_cost_ms: Optional[float] = None
+    cache_key: Optional[str] = None
+    highlight: bool = False
     limit: Optional[int] = None
     offset: Optional[int] = None
 ```
@@ -721,13 +841,19 @@ class RetryPolicy:
     max_attempts: int = 3
     base_delay: float = 0.05
     max_delay: float = 1.0
-    retryable: Tuple[Type[BaseException], ...] = (TimeoutError, ConnectionError)
+    retryable: Tuple[Type[BaseException], ...] = (
+        TimeoutError, ConnectionError, ServerNotReadyError, ServerBusyError,
+    )
 ```
 
-Exponential backoff with full jitter. Only exceptions in `retryable` are retried;
-`ServerError` / `InputValidationError` / `ProtocolError` are never retried because
-resending cannot change the outcome. The pool applies it only to its read-only
-delegation API.
+Exponential backoff with full jitter. Only exceptions in `retryable` are retried.
+The two coded server states that can clear on their own — `ServerNotReadyError`
+(loading / not ready) and `ServerBusyError` (rate limited, or a long operation
+holding the table) — are retried by default, following the server's numeric
+error code rather than its message text (v1.10+). A plain `ServerError` (a
+request-shape fault), `InputValidationError` and `ProtocolError` are never
+retried because resending cannot change the outcome. The pool applies this only
+to its read-only delegation API.
 
 ### CircuitBreakerConfig
 
@@ -799,11 +925,74 @@ on Python 3.11+ that is the same class as `asyncio.TimeoutError`, so
 
 ### InputValidationError
 
-Raised when input validation fails.
+Raised when input validation fails. Identifiers (table, primary key, sort
+column, filter key) are sent as bare tokens, so they may not contain
+whitespace, control characters, or a `"` / `'` / `\` delimiter. Free-form
+values (queries, terms, filter values) accept any of those except control
+characters and are quoted on the wire as needed.
 
 ### ServerError
 
 Raised when server returns an error response.
+
+```python
+class ServerError(MygramError):
+    message: str
+    error_code: Optional[int]   # numeric code from a v1.10+ ERROR frame
+
+    @property
+    def is_transient(self) -> bool
+```
+
+From v1.10 the server prefixes every `ERROR` frame with a numeric code, and the
+client decodes it into `error_code`. Branch on the code rather than matching the
+message: messages are free to change, codes are the protocol contract. Against
+an older server the frame is untyped and `error_code` is `None`.
+
+`is_transient` is `True` for the codes describing a temporary server state
+(`SERVER_LOADING`, `SERVER_NOT_READY`, `SERVER_BUSY`).
+
+### AuthenticationError (v1.10+)
+
+Raised when `AUTH` is rejected, or an administrative command is issued on a
+connection that has not authenticated (error code `PERMISSION_DENIED`).
+Subclasses `ServerError`.
+
+### ServerNotReadyError (v1.10+)
+
+Raised when the server is still loading or not yet ready to serve the request
+(error codes `SERVER_LOADING`, `SERVER_NOT_READY`). Retryable. Subclasses
+`ServerError`.
+
+### ServerBusyError (v1.10+)
+
+Raised when the server's request capacity is temporarily exhausted — rate
+limiting, or a long-running operation holding the table (error code
+`SERVER_BUSY`). Retryable after a backoff. Subclasses `ServerError`.
+
+### ErrorCode (v1.10+)
+
+```python
+class ErrorCode(IntEnum):
+    ...
+```
+
+The server's numeric error codes, grouped by module range: 0-999 general,
+1000-1999 configuration, 2000-2999 MySQL/replication, 3000-3999 query parsing,
+4000-4999 index/search, 5000-5999 storage/dump, 6000-6999 network/server,
+7000-7999 client, 8000-8999 cache.
+
+```python
+from mygramdb_client import ErrorCode, ServerError
+
+try:
+    await client.search('articles', 'python')
+except ServerError as exc:
+    if exc.error_code == ErrorCode.TABLE_NOT_FOUND:
+        ...
+```
+
+`TRANSIENT_ERROR_CODES` is the frozenset backing `ServerError.is_transient`.
 
 ### PoolTimeoutError
 
