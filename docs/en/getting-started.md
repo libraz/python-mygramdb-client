@@ -30,7 +30,7 @@ rye sync
 
 ## Requirements
 
-- Python 3.9 or higher
+- Python 3.11 or higher
 - asyncio support
 
 ## Basic Usage

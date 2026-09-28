@@ -8,15 +8,13 @@ authors = [
 license = { text = "MIT" }
 dependencies = []
 readme = "README.md"
-requires-python = ">= 3.9"
+requires-python = ">= 3.11"
 keywords = ["mygramdb", "full-text-search", "database", "client", "asyncio"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -59,8 +57,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.mypy]
-# 3.10 is the oldest target mypy accepts; the package itself still supports 3.9.
-python_version = "3.10"
+python_version = "3.11"
 files = ["src/mygramdb_client"]
 ignore_missing_imports = true
 warn_unused_ignores = true

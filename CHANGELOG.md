@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Python 3.11 or later is required; Python 3.9 and 3.10 are no longer
+  supported
+
 ### Fixed
 
 - MygramDB v1.10.2 protocol
