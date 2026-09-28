@@ -200,7 +200,7 @@ async def debug_example():
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `host` | str | "127.0.0.1" | Server hostname |
+| `host` | str | "127.0.0.1" | Server hostname, IPv4 literal, or IPv6 literal (e.g. `"::1"`, v1.10.2+) |
 | `port` | int | 11016 | Server port |
 | `socket_path` | str | "" | Unix socket path; overrides host/port when set |
 | `timeout` | float | 5.0 | Default timeout (seconds) for connect and per-command reads |
@@ -276,6 +276,25 @@ MygramDB v1.9 (facet pagination via `FacetOptions.offset` /
 `FacetResponse.total_count`, and comparison filters via `filter_conditions`),
 v1.7 (multi-database, `search_raw`, runtime variables, on-demand sync) and v1.6
 (fuzzy search, highlight, facets, BM25) remain supported.
+
+## MygramDB v1.10.2 Notes
+
+Every wire-bound string (search text, AND/NOT terms, filter values, `SET`/
+`SHOW VARIABLES LIKE`/`DUMP` arguments) now goes through one shared quoting
+decision that also quotes on Unicode whitespace (e.g. the full-width space
+U+3000, no-break space U+00A0) and on a case-insensitive clause keyword —
+this client already applied the same rule to ASCII whitespace and quote
+characters, so no caller-visible change follows unless a query previously
+relied on unquoted Unicode whitespace splitting into multiple terms. See
+[Wire quoting](api-reference.md#wire-quoting).
+
+`simplify_search_expression()` now raises `ValueError` for an OR or
+parenthesized sub-expression instead of synthesizing a `main_term` that lost
+the OR/grouping meaning once quoted; use `convert_search_expression()` with
+`search_raw()` for those. See the [Search Expression guide](search-expression.md).
+
+A SEARCH result's primary key containing whitespace is decoded from its
+quoted wire form; `ClientConfig.host` accepts an IPv6 literal.
 
 ## Next Steps
 

@@ -2,6 +2,25 @@
 
 Complete API documentation for the mygramdb-client Python library.
 
+## Wire quoting
+
+Every free-form string this client sends -- a search query, an AND/NOT term, a
+filter value, a `SET`/`SHOW VARIABLES LIKE`/`DUMP` argument -- goes through one
+shared quoting decision (MygramDB v1.10.2+, mirroring the C++ SDK's
+`QuoteWireToken`). A value is wrapped in double quotes, with internal quotes
+and backslashes escaped, when it is:
+
+- empty,
+- a reserved clause keyword case-insensitively (`AND`, `OR`, `NOT`, `FILTER`,
+  `SORT`, `LIMIT`, `OFFSET`, `HIGHLIGHT`, `FUZZY`, `FACET`, `ORDER`),
+- or contains ASCII or Unicode whitespace (including the full-width space
+  U+3000 and no-break space U+00A0), a control character, `"`, `'`, `\`, `(`
+  or `)`.
+
+Callers pass raw, unescaped text; the client applies this decision
+automatically at every call site. A primary key returned by `search()`
+containing whitespace is decoded back from its quoted wire form the same way.
+
 ## MygramClient
 
 The main client class for interacting with MygramDB.
@@ -76,10 +95,12 @@ async def search(
 ) -> SearchResponse
 ```
 
-Search for documents in a table. Multi-word queries are quoted automatically so
-they reach the server as a single phrase token; use
-[`search_raw()`](#search_raw) for boolean `AND`/`OR`/`NOT`/grouping expressions,
-or set `options.query_mode = QueryMode.BOOLEAN` (v1.10+) to combine such an
+Search for documents in a table. `query` is quoted automatically when needed
+(see [Wire quoting](#wire-quoting)) so a multi-word phrase, a literal keyword
+like `AND`, or text containing Unicode whitespace reaches the server as one
+literal token; use [`search_raw()`](#search_raw) for boolean
+`AND`/`OR`/`NOT`/grouping expressions, or set
+`options.query_mode = QueryMode.BOOLEAN` (v1.10+) to combine such an
 expression with filters, sorting, fuzzy matching and highlighting in one call.
 
 **Parameters:**
@@ -161,13 +182,18 @@ Count matching documents in a table.
 async def get(table: str, primary_key: str) -> Document
 ```
 
-Get a document by its primary key.
+Get a document by its primary key. `primary_key` is quoted automatically
+(see [Wire quoting](#wire-quoting)) rather than rejected for whitespace, so a
+key returned by [`search()`](#search) can always be sent back here unchanged.
 
 **Parameters:**
 - `table` - Table name
 - `primary_key` - Primary key value
 
-**Returns:** `Document` containing primary key and fields.
+**Returns:** `Document` containing primary key and fields. Both the primary
+key and any string field value are decoded from their quoted wire form, so
+one containing whitespace comes back intact rather than split on the space
+that separates fields.
 
 #### facet() (v1.6+)
 
@@ -523,6 +549,10 @@ still in flight, so the socket cannot be reused.
 loopback-only. The TCP transport does not encrypt it; keep that listener on a
 trusted network or behind a terminating proxy.
 
+`host` accepts an IPv6 literal (e.g. `"::1"`) or a hostname that resolves only
+to an AAAA record; `asyncio.open_connection()` resolves and connects the same
+way for both address families (v1.10.2).
+
 ### SearchOptions
 
 ```python
@@ -584,7 +614,8 @@ class FilterCondition:
 ```
 
 A single comparison filter. `column` is sent unquoted and validated as an
-identifier; `value` is quoted when it contains whitespace or quote characters.
+identifier; `value` goes through the same wire-quoting decision as a search
+term (see [Wire quoting](#wire-quoting) below).
 
 ### HighlightOptions (v1.6+)
 
@@ -1045,7 +1076,10 @@ circuit breaker is open.
 def parse_search_expression(expression: str) -> SearchExpression
 ```
 
-Parse a web-style search expression.
+Parse a web-style search expression. Every unprefixed term is required
+(implicit AND), matching a `+` prefix; see the
+[Search Expression guide](search-expression.md) for the full syntax and
+quoting behavior (MygramDB v1.10.2+).
 
 **Parameters:**
 - `expression` - Search expression string
@@ -1066,6 +1100,13 @@ Simplify a search expression to basic terms.
 - `expression` - Search expression string
 
 **Returns:** `SimplifiedExpression` with main_term, and_terms, not_terms.
+`main_term`/`and_terms`/`not_terms` are plain text; the caller re-applies
+[wire quoting](#wire-quoting) at whichever destination the term is sent to.
+
+**Raises:** `ValueError` if the expression has no required term, or has an
+OR/parenthesized sub-expression that cannot be represented losslessly as
+`main_term`/`and_terms`/`not_terms` -- use `convert_search_expression()` with
+`search_raw()` instead.
 
 ### convert_search_expression()
 

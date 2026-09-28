@@ -2,6 +2,26 @@
 
 mygramdb-client Python ライブラリの完全な API ドキュメントです。
 
+## ワイヤークォート
+
+このクライアントが送信する自由形式の文字列（検索クエリ、AND/NOT ターム、
+フィルタ値、`SET`/`SHOW VARIABLES LIKE`/`DUMP` 引数）はすべて、一つの共有
+クォート判定を通ります（MygramDB v1.10.2+、C++ SDK の `QuoteWireToken` に
+準拠）。値は以下のいずれかに該当する場合、内部のクォートとバックスラッシュ
+をエスケープしたうえで二重引用符で囲まれます:
+
+- 空文字列
+- 予約済みの句キーワードと大文字小文字を区別せず一致する場合（`AND`、
+  `OR`、`NOT`、`FILTER`、`SORT`、`LIMIT`、`OFFSET`、`HIGHLIGHT`、`FUZZY`、
+  `FACET`、`ORDER`）
+- ASCII または Unicode の空白（全角スペース U+3000 やノーブレークスペース
+  U+00A0 を含む）、制御文字、`"`、`'`、`\`、`(`、`)` のいずれかを含む場合
+
+呼び出し側は生の、エスケープされていないテキストを渡すだけで、クライアント
+がすべての呼び出し箇所で自動的にこの判定を適用します。`search()` が返す
+プライマリキーに空白が含まれる場合も、同じ規則でクォートされたワイヤー
+形式からデコードされます。
+
 ## MygramClient
 
 MygramDB とやり取りするためのメインクライアントクラスです。
@@ -76,8 +96,10 @@ async def search(
 ) -> SearchResponse
 ```
 
-テーブル内のドキュメントを検索します。複数語のクエリは自動的に引用符で囲まれ、
-単一のフレーズトークンとしてサーバーに送信されます。`AND`/`OR`/`NOT`/グループ化を
+テーブル内のドキュメントを検索します。`query` は必要に応じて自動的にクォート
+され（[ワイヤークォート](#ワイヤークォート) を参照）、複数語のフレーズや
+`AND` のようなリテラルキーワード、Unicode 空白を含むテキストも 1 個の
+リテラルトークンとしてサーバーに届きます。`AND`/`OR`/`NOT`/グループ化を
 含むブール式には [`search_raw()`](#search_raw) を使用するか、`options.query_mode`
 に `QueryMode.BOOLEAN` を指定してください（v1.10+）。後者ならブール式とフィルタ・
 ソート・あいまい検索・ハイライトを 1 回の呼び出しで組み合わせられます。
@@ -160,13 +182,19 @@ async def count(
 async def get(table: str, primary_key: str) -> Document
 ```
 
-プライマリキーでドキュメントを取得します。
+プライマリキーでドキュメントを取得します。`primary_key` は空白を含んでいても
+拒否されず、自動的にクォートされます（[ワイヤークォート](#ワイヤークォート)
+を参照）。そのため [`search()`](#search) が返したプライマリキーを、そのまま
+ここに渡し返すことができます。
 
 **パラメータ:**
 - `table` - テーブル名
 - `primary_key` - プライマリキー値
 
-**戻り値:** プライマリキーとフィールドを含む `Document`。
+**戻り値:** プライマリキーとフィールドを含む `Document`。プライマリキーと
+文字列フィールドの値はいずれもクォートされたワイヤー形式からデコードされる
+ため、空白を含んでいてもフィールドの区切りスペースで分割されることなく
+そのまま返ります。
 
 #### facet() (v1.6+)
 
@@ -523,6 +551,10 @@ class ClientConfig:
 必須です。TCP 経路はトークンを暗号化しないため、そのリスナーは信頼できるネット
 ワーク内か、TLS を終端するプロキシの背後に置いてください。
 
+`host` には IPv6 リテラル（例: `"::1"`）や、AAAA レコードのみに解決される
+ホスト名も指定できます。`asyncio.open_connection()` はどちらのアドレス
+ファミリでも同じ方法で解決・接続します（v1.10.2）。
+
 ### SearchOptions
 
 ```python
@@ -583,7 +615,8 @@ class FilterCondition:
 ```
 
 比較フィルタ 1 件を表します。`column` は引用符なしで送信されるため識別子として
-検証され、`value` は空白や引用符を含む場合に引用されます。
+検証され、`value` は検索タームと同じワイヤークォート判定を通ります
+（下記の[ワイヤークォート](#ワイヤークォート)を参照）。
 
 ### HighlightOptions (v1.6+)
 
@@ -1036,7 +1069,10 @@ except ServerError as exc:
 def parse_search_expression(expression: str) -> SearchExpression
 ```
 
-Web スタイルの検索式をパースします。
+Web スタイルの検索式をパースします。プレフィックスなしのタームはすべて
+必須（暗黙の AND、`+` プレフィックスと同じ扱い）です。構文とクォートの
+詳細は[検索式ガイド](search-expression.md)を参照してください（MygramDB
+v1.10.2+）。
 
 **パラメータ:**
 - `expression` - 検索式文字列
@@ -1057,6 +1093,13 @@ def simplify_search_expression(expression: str) -> SimplifiedExpression
 - `expression` - 検索式文字列
 
 **戻り値:** main_term、and_terms、not_terms を含む `SimplifiedExpression`。
+`main_term`/`and_terms`/`not_terms` はプレーンテキストです。呼び出し側が
+送信先ごとに[ワイヤークォート](#ワイヤークォート)を適用します。
+
+**例外:** 式に必須タームが 1 つもない場合、または
+`main_term`/`and_terms`/`not_terms` として損失なく表現できない OR /
+括弧付き部分式を含む場合は `ValueError`。その場合は代わりに
+`convert_search_expression()` を `search_raw()` と組み合わせて使ってください。
 
 ### convert_search_expression()
 

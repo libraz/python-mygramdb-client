@@ -9,11 +9,13 @@
 
 Python client library for [MygramDB](https://github.com/libraz/mygram-db/) — a high-performance in-memory full-text search engine with MySQL replication support.
 
-> Compatible with **MygramDB v1.10** (admin `AUTH`, numeric error codes, TCP
-> readiness, boolean query mode) and **v1.9** (facet pagination, comparison
-> filters). v1.8 (verbatim boolean transport), v1.7 (multi-database,
-> `search_raw`, runtime variables, on-demand sync) and v1.6 (fuzzy search,
-> highlight, facets, BM25) remain supported.
+> Compatible with **MygramDB v1.10.2** (one wire-quoting rule for every
+> search/filter/command string, IPv6 servers, quoted primary keys) and
+> **v1.10** (admin `AUTH`, numeric error codes, TCP readiness, boolean query
+> mode). v1.9 (facet pagination, comparison filters), v1.8 (verbatim boolean
+> transport), v1.7 (multi-database, `search_raw`, runtime variables,
+> on-demand sync) and v1.6 (fuzzy search, highlight, facets, BM25) remain
+> supported.
 
 ## Overview
 
@@ -284,6 +286,26 @@ result = await client.search('articles', 'python AND (django OR flask)',
         highlight=HighlightOptions(),
     ))
 ```
+
+## MygramDB v1.10.2 Features
+
+### One quoting rule for every wire-bound string
+
+Search text, AND/NOT terms, filter values and command arguments (`SET`,
+`SHOW VARIABLES LIKE`, `DUMP`) all go through one quoting decision: quoted
+when empty, a reserved clause keyword (`AND`, `OR`, `NOT`, `FILTER`, `SORT`,
+`LIMIT`, `OFFSET`, `HIGHLIGHT`, `FUZZY`, `FACET`, `ORDER`, matched
+case-insensitively), or containing ASCII/Unicode whitespace (including the
+full-width space U+3000 and no-break space U+00A0), a control character, `"`,
+`'`, `\`, `(` or `)`. Callers pass raw text; the client quotes it
+automatically. A SEARCH result's primary key containing whitespace is decoded
+back from its quoted wire form. IPv6 servers are reachable by literal address
+(e.g. `host='::1'`) or a hostname that resolves only to an AAAA record.
+
+`simplify_search_expression()` now rejects an OR or parenthesized
+sub-expression with `ValueError` instead of quoting it as one opaque literal
+term — build it with `convert_search_expression()` and send it through
+`search_raw()` instead. See [Search Expression](docs/en/search-expression.md).
 
 ## High-throughput: Connection Pooling
 

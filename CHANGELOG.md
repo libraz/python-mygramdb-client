@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- MygramDB v1.10.2 protocol
+  - Every wire-bound string (search text, AND/NOT terms, filter values, and
+    `SET`/`SHOW VARIABLES LIKE`/`DUMP` command arguments) now goes through one
+    shared quoting decision (`mygramdb_client.wire_quoting`), replacing the
+    two slightly different ad-hoc escaping functions this client previously
+    had. It also quotes on Unicode whitespace (e.g. the full-width space
+    U+3000, no-break space U+00A0), which was previously sent unquoted and
+    could split into extra terms on the server
+  - `search_expression`'s web-syntax parser now matches the server's
+    semantics: every unprefixed term is required (implicit AND) instead of
+    being joined with `OR` when no `+` term is present; a parenthesized group
+    after `+`/`-` stays one required/excluded entry; a literal term colliding
+    with a clause keyword (e.g. `not`, `filter`, `sort`) is quoted rather than
+    reaching the server as an operator; and `simplify_search_expression()` now
+    raises `ValueError` for an OR/parenthesized sub-expression instead of
+    synthesizing a `main_term` that loses its meaning once quoted
+  - A quoted primary key containing whitespace in a `SEARCH` or `GET`
+    (`OK DOC`) response, and a quoted `GET` string field value, are decoded
+    back to their literal value instead of being read as multiple
+    space-separated tokens; `get()` now quotes its `primary_key` argument the
+    same way, so a key returned by `search()` can always be sent back to
+    `get()` unchanged
+  - A `SEARCH`/`COUNT` response with `HIGHLIGHT` or `DEBUG ON` in effect is no
+    longer mistaken for complete at a chunk boundary that lands right after
+    the header line, or right after the debug block's own opening blank line
+    (before `# DEBUG` itself has arrived)
+  - `ClientConfig.host` accepting an IPv6 literal or an IPv6-only hostname is
+    confirmed working (`asyncio.open_connection` already resolves and
+    connects both address families)
+
 ## [1.4.0] - 2026-08-10
 
 ### Added
