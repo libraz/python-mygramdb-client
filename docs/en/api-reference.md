@@ -6,8 +6,8 @@ Complete API documentation for the mygramdb-client Python library.
 
 Every free-form string this client sends -- a search query, an AND/NOT term, a
 filter value, a `SET`/`SHOW VARIABLES LIKE`/`DUMP` argument -- goes through one
-shared quoting decision (MygramDB v1.10.2+, mirroring the C++ SDK's
-`QuoteWireToken`). A value is wrapped in double quotes, with internal quotes
+shared quoting decision, mirroring the C++ SDK's `QuoteWireToken`. A value is
+wrapped in double quotes, with internal quotes
 and backslashes escaped, when it is:
 
 - empty,
@@ -45,14 +45,17 @@ async def connect() -> None
 ```
 
 Connect to MygramDB server. When `ClientConfig.admin_token` is set, `AUTH` is
-issued on the fresh connection before it is handed back (v1.10+).
+issued on the fresh connection before it is handed back (MygramDB 1.10 or
+later).
 
 **Raises:**
 - `ConnectionError` - If connection fails
 - `TimeoutError` - If connection times out
 - `AuthenticationError` - If the configured admin token is rejected
 
-#### authenticate() (v1.10+)
+#### authenticate()
+
+Requires MygramDB 1.10 or later.
 
 ```python
 async def authenticate(token: str) -> None
@@ -100,13 +103,14 @@ Search for documents in a table. `query` is quoted automatically when needed
 like `AND`, or text containing Unicode whitespace reaches the server as one
 literal token; use [`search_raw()`](#search_raw) for boolean
 `AND`/`OR`/`NOT`/grouping expressions, or set
-`options.query_mode = QueryMode.BOOLEAN` (v1.10+) to combine such an
-expression with filters, sorting, fuzzy matching and highlighting in one call.
+`options.query_mode = QueryMode.BOOLEAN` (MygramDB 1.10 or later) to combine
+such an expression with filters, sorting, fuzzy matching and highlighting in
+one call.
 
 **Parameters:**
-- `table` - Table name to search in. In a MygramDB v1.7+ multi-database
-  deployment, pass a `database.table` identity (e.g. `app_db.articles`); a bare
-  name still works for single-database servers.
+- `table` - Table name to search in. In a multi-database deployment (MygramDB
+  1.7 or later), pass a `database.table` identity (e.g. `app_db.articles`); a
+  bare name still works for single-database servers.
 - `query` - Search query text, or a boolean expression when
   `options.query_mode` is `QueryMode.BOOLEAN`
 - `options` - Optional search options
@@ -132,9 +136,10 @@ async def search_raw(
 ) -> SearchResponse
 ```
 
-Search using a pre-built boolean expression (MygramDB v1.7+). The expression is
-sent verbatim (unquoted, MygramDB v1.8+) so the server's AST parser sees the
-nested `AND` / `OR` / `NOT` / grouping structure; a leading quote would collapse
+Search using a pre-built boolean expression (MygramDB 1.7 or later). The
+expression is sent verbatim, unquoted (MygramDB 1.8 or later), so the
+server's AST parser sees the nested `AND` / `OR` / `NOT` / grouping structure;
+a leading quote would collapse
 it into a single phrase. Pair with
 [`convert_search_expression()`](#convert_search_expression) to preserve OR /
 grouping semantics that `search()`'s AND/NOT decomposition cannot express.
@@ -195,7 +200,7 @@ key and any string field value are decoded from their quoted wire form, so
 one containing whitespace comes back intact rather than split on the space
 that separates fields.
 
-#### facet() (v1.6+)
+#### facet()
 
 ```python
 async def facet(
@@ -216,8 +221,8 @@ refinements).
 - `options` - Optional `FacetOptions` (`query`, `and_terms`, `not_terms`,
   `filters`, `filter_conditions`, `limit`, `offset`)
 
-**Returns:** `FacetResponse` containing the requested page of facet values and,
-from v1.9, the total distinct value count in `total_count`.
+**Returns:** `FacetResponse` containing the requested page of facet values.
+`total_count` carries the total distinct value count (MygramDB 1.9 or later).
 
 #### info()
 
@@ -227,8 +232,8 @@ async def info() -> ServerInfo
 
 Get server information.
 
-**Returns:** `ServerInfo` with version, uptime, statistics, and — from v1.10 —
-`data_initialized` and `ready`.
+**Returns:** `ServerInfo` with version, uptime, statistics, plus
+`data_initialized` and `ready` (MygramDB 1.10 or later).
 
 #### get_config()
 
@@ -248,9 +253,9 @@ async def get_replication_status() -> ReplicationStatus
 
 Get current replication status.
 
-**Returns:** `ReplicationStatus` with running state and GTID, plus the v1.10
-diagnostics (reported state, CRC errors, schema compatibility, the last failure
-and the applied-progress lag).
+**Returns:** `ReplicationStatus` with running state and GTID, plus diagnostics
+(MygramDB 1.10 or later): reported state, CRC errors, schema compatibility,
+the last failure and the applied-progress lag.
 
 #### stop_replication()
 
@@ -297,7 +302,9 @@ Send raw command to server.
 
 **Returns:** Response string from server.
 
-#### set_variable() (v1.7+)
+#### set_variable()
+
+Requires MygramDB 1.7 or later.
 
 ```python
 async def set_variable(name: str, value: str) -> None
@@ -306,7 +313,9 @@ async def set_variable(name: str, value: str) -> None
 Set a runtime variable (MySQL-compatible `SET`). Values containing whitespace
 are quoted automatically. Raises `ProtocolError` if the server rejects it.
 
-#### show_variables() (v1.7+)
+#### show_variables()
+
+Requires MygramDB 1.7 or later.
 
 ```python
 async def show_variables(like_pattern: Optional[str] = None) -> str
@@ -315,7 +324,9 @@ async def show_variables(like_pattern: Optional[str] = None) -> str
 Return the runtime variables table (`SHOW VARIABLES [LIKE <pattern>]`) as the
 raw server response string.
 
-#### sync() (v1.7+)
+#### sync()
+
+Requires MygramDB 1.7 or later.
 
 ```python
 async def sync(table: str) -> str
@@ -324,7 +335,9 @@ async def sync(table: str) -> str
 Start an on-demand full reload of a table (`SYNC <table>`). Accepts a bare or
 `database.table` identity. Returns the server acknowledgement.
 
-#### sync_status() (v1.7+)
+#### sync_status()
+
+Requires MygramDB 1.7 or later.
 
 ```python
 async def sync_status() -> str
@@ -333,7 +346,9 @@ async def sync_status() -> str
 Return the `SYNC STATUS` report (in-flight and recent sync operations) as the
 raw server response string.
 
-#### sync_stop() (v1.7+)
+#### sync_stop()
+
+Requires MygramDB 1.7 or later.
 
 ```python
 async def sync_stop(table: Optional[str] = None) -> str
@@ -527,7 +542,7 @@ class ClientConfig:
     connect_timeout: Optional[float] = None   # Connection deadline (None -> timeout)
     command_timeout: Optional[float] = None   # Total response deadline (None -> timeout)
     max_response_bytes: int = 64 * 1024 * 1024  # Cap on one response frame (0 = unbounded)
-    admin_token: str = ""                     # Sent as AUTH after connect/reconnect (v1.10+)
+    admin_token: str = ""                     # Sent as AUTH after connect/reconnect (MygramDB 1.10+)
     recv_buffer_size: int = 65536
     max_query_length: int = 128
     auto_reconnect: bool = False              # Reconnect+resend if the socket died before the write
@@ -545,13 +560,13 @@ indefinitely. A response that grows past `max_response_bytes` raises
 `ProtocolError` and drops the connection — the rest of the oversized frame is
 still in flight, so the socket cannot be reused.
 
-`admin_token` is required from v1.10 whenever the server's TCP listener is not
-loopback-only. The TCP transport does not encrypt it; keep that listener on a
-trusted network or behind a terminating proxy.
+A server whose TCP listener is not loopback-only requires `admin_token`
+(MygramDB 1.10 or later). The TCP transport does not encrypt it; keep that
+listener on a trusted network or behind a terminating proxy.
 
 `host` accepts an IPv6 literal (e.g. `"::1"`) or a hostname that resolves only
 to an AAAA record; `asyncio.open_connection()` resolves and connects the same
-way for both address families (v1.10.2).
+way for both address families.
 
 ### SearchOptions
 
@@ -563,12 +578,12 @@ class SearchOptions:
     and_terms: List[str] = field(default_factory=list)
     not_terms: List[str] = field(default_factory=list)
     filters: Dict[str, str] = field(default_factory=dict)          # equality filters
-    filter_conditions: List[FilterCondition] = field(default_factory=list)  # comparison filters (v1.9+)
-    query_mode: QueryMode = QueryMode.LITERAL     # BOOLEAN parses AND/OR/NOT (v1.10+)
-    sort_column: Optional[str] = None             # "_score" for BM25 relevance (v1.6+); None = primary key
+    filter_conditions: List[FilterCondition] = field(default_factory=list)  # comparison filters (MygramDB 1.9+)
+    query_mode: QueryMode = QueryMode.LITERAL     # BOOLEAN parses AND/OR/NOT (MygramDB 1.10+)
+    sort_column: Optional[str] = None             # "_score" for BM25 relevance; None = primary key
     sort_desc: bool = True
-    fuzzy: int = 0                                # Levenshtein distance 0/1/2 (v1.6+)
-    highlight: Optional[HighlightOptions] = None  # enable HIGHLIGHT when set (v1.6+)
+    fuzzy: int = 0                                # Levenshtein distance 0/1/2
+    highlight: Optional[HighlightOptions] = None  # enable HIGHLIGHT when set
 ```
 
 `filters` are emitted before `filter_conditions`; both use the same wire shape
@@ -577,7 +592,9 @@ class SearchOptions:
 With no `sort_column` the server orders by primary key descending, so only
 `sort_desc=False` adds a clause (`SORT ASC`).
 
-### QueryMode (v1.10+)
+### QueryMode
+
+Requires MygramDB 1.10 or later.
 
 ```python
 class QueryMode(str, Enum):
@@ -591,7 +608,9 @@ express. `LITERAL` is the default on every surface, so `alpha AND beta` does not
 change meaning when an application moves between TCP, HTTP, and the typed
 clients.
 
-### FilterOp (v1.9+)
+### FilterOp
+
+Requires MygramDB 1.9 or later.
 
 ```python
 class FilterOp(str, Enum):
@@ -603,7 +622,9 @@ class FilterOp(str, Enum):
     LTE = "<="
 ```
 
-### FilterCondition (v1.9+)
+### FilterCondition
+
+Requires MygramDB 1.9 or later.
 
 ```python
 @dataclass
@@ -617,7 +638,7 @@ A single comparison filter. `column` is sent unquoted and validated as an
 identifier; `value` goes through the same wire-quoting decision as a search
 term (see [Wire quoting](#wire-quoting) below).
 
-### HighlightOptions (v1.6+)
+### HighlightOptions
 
 ```python
 @dataclass
@@ -630,7 +651,9 @@ class HighlightOptions:
 
 An empty `HighlightOptions()` enables highlighting with server defaults.
 
-### SearchRawOptions (v1.7+)
+### SearchRawOptions
+
+Requires MygramDB 1.7 or later.
 
 ```python
 @dataclass
@@ -648,10 +671,10 @@ class CountOptions:
     and_terms: List[str] = field(default_factory=list)
     not_terms: List[str] = field(default_factory=list)
     filters: Dict[str, str] = field(default_factory=dict)
-    filter_conditions: List[FilterCondition] = field(default_factory=list)  # v1.9+
+    filter_conditions: List[FilterCondition] = field(default_factory=list)  # MygramDB 1.9+
 ```
 
-### FacetOptions (v1.6+)
+### FacetOptions
 
 ```python
 @dataclass
@@ -660,9 +683,9 @@ class FacetOptions:
     and_terms: List[str] = field(default_factory=list)
     not_terms: List[str] = field(default_factory=list)
     filters: Dict[str, str] = field(default_factory=dict)
-    filter_conditions: List[FilterCondition] = field(default_factory=list)  # v1.9+
+    filter_conditions: List[FilterCondition] = field(default_factory=list)  # MygramDB 1.9+
     limit: int = 0                                       # max facet values (0 = no limit)
-    offset: int = 0                                      # distinct values to skip (v1.9+)
+    offset: int = 0                                      # distinct values to skip (MygramDB 1.9+)
 ```
 
 ### SearchResponse
@@ -682,7 +705,7 @@ class SearchResponse:
 class SearchResult:
     primary_key: str
     score: Optional[float] = None
-    snippet: Optional[str] = None   # set only when HIGHLIGHT was requested (v1.6+)
+    snippet: Optional[str] = None   # set only when HIGHLIGHT was requested
 ```
 
 ### CountResponse
@@ -694,7 +717,7 @@ class CountResponse:
     debug: Optional[DebugInfo] = None
 ```
 
-### FacetValue (v1.6+)
+### FacetValue
 
 ```python
 @dataclass
@@ -703,17 +726,17 @@ class FacetValue:
     count: int
 ```
 
-### FacetResponse (v1.6+)
+### FacetResponse
 
 ```python
 @dataclass
 class FacetResponse:
     results: List[FacetValue] = field(default_factory=list)
-    total_count: int = 0   # distinct values before OFFSET/LIMIT (v1.9+)
+    total_count: int = 0   # distinct values before OFFSET/LIMIT (MygramDB 1.9+)
 ```
 
 `results` is the returned page; `total_count` is how many distinct values exist
-in total. Against a pre-v1.9 server, which reports only the page size,
+in total. Against a pre-1.9 server, which reports only the page size,
 `total_count` mirrors `len(results)`.
 
 ### Document
@@ -737,13 +760,13 @@ class ServerInfo:
     index_size_bytes: int = 0
     doc_count: int = 0
     tables: List[str] = field(default_factory=list)
-    data_initialized: bool = False  # every table finished its initial load (v1.10+)
-    ready: bool = False             # ready to serve traffic (v1.10+)
+    data_initialized: bool = False  # every table finished its initial load (MygramDB 1.10+)
+    ready: bool = False             # ready to serve traffic (MygramDB 1.10+)
 ```
 
 `data_initialized` and `ready` come from the same inputs as the HTTP health
 endpoint, so a TCP-only deployment can gate traffic without polling HTTP. Both
-read `False` against a pre-v1.10 server, which does not report them.
+read `False` against a pre-1.10 server, which does not report them.
 
 ### ReplicationStatus
 
@@ -756,7 +779,7 @@ class ReplicationStatus:
     processed_events: int = 0  # total binlog events processed (multi-line response)
     queue_size: int = 0        # pending events in the apply queue (multi-line response)
 
-    # Diagnostics (MygramDB v1.10+)
+    # Diagnostics (MygramDB 1.10+)
     state: str = ""                # running | stopped | failed | not_configured
     crc_errors: int = 0            # binlog events whose checksum did not verify
     schema_incompatible: bool = False
@@ -768,7 +791,7 @@ class ReplicationStatus:
 
 `state` separates a reader stopped on request from one stopped on an error,
 which `running` alone cannot express; an unrecognized value is passed through
-rather than dropped. Fields a pre-v1.10 server does not report keep their
+rather than dropped. Fields a pre-1.10 server does not report keep their
 defaults.
 
 `seconds_since_last_applied` is the lag to alert on. It reads `None` when the
@@ -903,7 +926,8 @@ Exponential backoff with full jitter. Only exceptions in `retryable` are retried
 The two coded server states that can clear on their own — `ServerNotReadyError`
 (loading / not ready) and `ServerBusyError` (rate limited, or a long operation
 holding the table) — are retried by default, following the server's numeric
-error code rather than its message text (v1.10+). A plain `ServerError` (a
+error code rather than its message text (MygramDB 1.10 or later). A plain
+`ServerError` (a
 request-shape fault), `InputValidationError` and `ProtocolError` are never
 retried because resending cannot change the outcome. The pool applies this only
 to its read-only delegation API.
@@ -991,39 +1015,48 @@ Raised when server returns an error response.
 ```python
 class ServerError(MygramError):
     message: str
-    error_code: Optional[int]   # numeric code from a v1.10+ ERROR frame
+    error_code: Optional[int]   # numeric code from an ERROR frame (MygramDB 1.10+)
 
     @property
     def is_transient(self) -> bool
 ```
 
-From v1.10 the server prefixes every `ERROR` frame with a numeric code, and the
-client decodes it into `error_code`. Branch on the code rather than matching the
-message: messages are free to change, codes are the protocol contract. Against
-an older server the frame is untyped and `error_code` is `None`.
+The server prefixes every `ERROR` frame with a numeric code (MygramDB 1.10 or
+later), and the client decodes it into `error_code`. Branch on the code rather
+than matching the message: messages are free to change, codes are the
+protocol contract. Against an older server the frame is untyped and
+`error_code` is `None`.
 
 `is_transient` is `True` for the codes describing a temporary server state
 (`SERVER_LOADING`, `SERVER_NOT_READY`, `SERVER_BUSY`).
 
-### AuthenticationError (v1.10+)
+### AuthenticationError
+
+Requires MygramDB 1.10 or later.
 
 Raised when `AUTH` is rejected, or an administrative command is issued on a
 connection that has not authenticated (error code `PERMISSION_DENIED`).
 Subclasses `ServerError`.
 
-### ServerNotReadyError (v1.10+)
+### ServerNotReadyError
+
+Requires MygramDB 1.10 or later.
 
 Raised when the server is still loading or not yet ready to serve the request
 (error codes `SERVER_LOADING`, `SERVER_NOT_READY`). Retryable. Subclasses
 `ServerError`.
 
-### ServerBusyError (v1.10+)
+### ServerBusyError
+
+Requires MygramDB 1.10 or later.
 
 Raised when the server's request capacity is temporarily exhausted — rate
 limiting, or a long-running operation holding the table (error code
 `SERVER_BUSY`). Retryable after a backoff. Subclasses `ServerError`.
 
-### ErrorCode (v1.10+)
+### ErrorCode
+
+Requires MygramDB 1.10 or later.
 
 ```python
 class ErrorCode(IntEnum):
@@ -1079,7 +1112,7 @@ def parse_search_expression(expression: str) -> SearchExpression
 Parse a web-style search expression. Every unprefixed term is required
 (implicit AND), matching a `+` prefix; see the
 [Search Expression guide](search-expression.md) for the full syntax and
-quoting behavior (MygramDB v1.10.2+).
+quoting behavior.
 
 **Parameters:**
 - `expression` - Search expression string
@@ -1134,7 +1167,9 @@ Convert search expression to query string.
 
 ---
 
-## Table Identity Helpers (v1.7+)
+## Table Identity Helpers
+
+Requires MygramDB 1.7 or later.
 
 ### qualify_table_identity()
 

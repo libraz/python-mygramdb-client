@@ -4,11 +4,7 @@ mygramdb-client Python ライブラリの完全な API ドキュメントです�
 
 ## ワイヤークォート
 
-このクライアントが送信する自由形式の文字列（検索クエリ、AND/NOT ターム、
-フィルタ値、`SET`/`SHOW VARIABLES LIKE`/`DUMP` 引数）はすべて、一つの共有
-クォート判定を通ります（MygramDB v1.10.2+、C++ SDK の `QuoteWireToken` に
-準拠）。値は以下のいずれかに該当する場合、内部のクォートとバックスラッシュ
-をエスケープしたうえで二重引用符で囲まれます:
+このクライアントが送信する自由形式の文字列（検索クエリ、AND/NOT ターム、フィルタ値、`SET`/`SHOW VARIABLES LIKE`/`DUMP` 引数）はすべて、一つの共有クォート判定を通ります（C++ SDK の `QuoteWireToken` に準拠）。値は以下のいずれかに該当する場合、内部のクォートとバックスラッシュをエスケープしたうえで二重引用符で囲まれます:
 
 - 空文字列
 - 予約済みの句キーワードと大文字小文字を区別せず一致する場合（`AND`、
@@ -45,15 +41,16 @@ MygramClient(config: Optional[ClientConfig] = None)
 async def connect() -> None
 ```
 
-MygramDB サーバーに接続します。`ClientConfig.admin_token` を設定している場合は、
-接続確立直後に `AUTH` を送信してから呼び出し元に返します（v1.10+）。
+MygramDB サーバーに接続します。`ClientConfig.admin_token` を設定している場合は、接続確立直後に `AUTH` を送信してから呼び出し元に返します（MygramDB 1.10 以降）。
 
 **例外:**
 - `ConnectionError` - 接続に失敗した場合
 - `TimeoutError` - 接続がタイムアウトした場合
 - `AuthenticationError` - 設定した管理トークンが拒否された場合
 
-#### authenticate() (v1.10+)
+#### authenticate()
+
+MygramDB 1.10 以降が必要です。
 
 ```python
 async def authenticate(token: str) -> None
@@ -96,18 +93,10 @@ async def search(
 ) -> SearchResponse
 ```
 
-テーブル内のドキュメントを検索します。`query` は必要に応じて自動的にクォート
-され（[ワイヤークォート](#ワイヤークォート) を参照）、複数語のフレーズや
-`AND` のようなリテラルキーワード、Unicode 空白を含むテキストも 1 個の
-リテラルトークンとしてサーバーに届きます。`AND`/`OR`/`NOT`/グループ化を
-含むブール式には [`search_raw()`](#search_raw) を使用するか、`options.query_mode`
-に `QueryMode.BOOLEAN` を指定してください（v1.10+）。後者ならブール式とフィルタ・
-ソート・あいまい検索・ハイライトを 1 回の呼び出しで組み合わせられます。
+テーブル内のドキュメントを検索します。`query` は必要に応じて自動的にクォートされ（[ワイヤークォート](#ワイヤークォート) を参照）、複数語のフレーズや `AND` のようなリテラルキーワード、Unicode 空白を含むテキストも 1 個のリテラルトークンとしてサーバーに届きます。`AND`/`OR`/`NOT`/グループ化を含むブール式には [`search_raw()`](#search_raw) を使用するか、`options.query_mode` に `QueryMode.BOOLEAN` を指定してください（MygramDB 1.10 以降）。後者ならブール式とフィルタ・ソート・あいまい検索・ハイライトを 1 回の呼び出しで組み合わせられます。
 
 **パラメータ:**
-- `table` - 検索対象のテーブル名。MygramDB v1.7+ のマルチデータベース構成では
-  `database.table` 形式の識別子（例: `app_db.articles`）を渡します。単一
-  データベースのサーバーでは従来どおりテーブル名のみでも動作します。
+- `table` - 検索対象のテーブル名。マルチデータベース構成（MygramDB 1.7 以降）では `database.table` 形式の識別子（例: `app_db.articles`）を渡します。単一データベースのサーバーではテーブル名のみでも動作します。
 - `query` - 検索クエリ文字列。`options.query_mode` が `QueryMode.BOOLEAN` の
   場合はブール式
 - `options` - オプションの検索オプション
@@ -133,13 +122,7 @@ async def search_raw(
 ) -> SearchResponse
 ```
 
-事前に構築したブール式で検索します（MygramDB v1.7+）。式はそのまま（引用符
-なし、MygramDB v1.8+）送信されるため、サーバーの AST パーサがネストした
-`AND` / `OR` / `NOT` / グループ化の構造を解釈できます。引用符で囲むと式全体が
-単一のフレーズに潰れてしまいます。`search()` の AND/NOT 分解では表現できない
-OR / グループ化セマンティクスを保持するには、[`convert_search_expression()`](#convert_search_expression)
-と組み合わせて使用します。制御文字は送信前に拒否されるため、引用符なしの送信でも
-インジェクションに対して安全です。
+事前に構築したブール式で検索します（MygramDB 1.7 以降）。式はそのまま（引用符なし、MygramDB 1.8 以降）送信されるため、サーバーの AST パーサがネストした `AND` / `OR` / `NOT` / グループ化の構造を解釈できます。引用符で囲むと式全体が単一のフレーズに潰れてしまいます。`search()` の AND/NOT 分解では表現できない OR / グループ化セマンティクスを保持するには、[`convert_search_expression()`](#convert_search_expression) と組み合わせて使用します。制御文字は送信前に拒否されるため、引用符なしの送信でもインジェクションに対して安全です。
 
 **パラメータ:**
 - `table` - テーブル名（`database.table` 形式も可）
@@ -196,7 +179,7 @@ async def get(table: str, primary_key: str) -> Document
 ため、空白を含んでいてもフィールドの区切りスペースで分割されることなく
 そのまま返ります。
 
-#### facet() (v1.6+)
+#### facet()
 
 ```python
 async def facet(
@@ -217,8 +200,7 @@ async def facet(
 - `options` - オプションの `FacetOptions`（`query`、`and_terms`、`not_terms`、
   `filters`、`filter_conditions`、`limit`、`offset`）
 
-**戻り値:** 要求したページ分のファセット値とカウントを含む `FacetResponse`。
-v1.9 以降は distinct 値の総数が `total_count` に入ります。
+**戻り値:** 要求したページ分のファセット値とカウントを含む `FacetResponse`。`total_count` には distinct 値の総数が入ります（MygramDB 1.9 以降）。
 
 #### info()
 
@@ -228,8 +210,7 @@ async def info() -> ServerInfo
 
 サーバー情報を取得します。
 
-**戻り値:** バージョン、稼働時間、統計情報を含む `ServerInfo`。v1.10 以降は
-`data_initialized` と `ready` も含みます。
+**戻り値:** バージョン、稼働時間、統計情報に加え、`data_initialized` と `ready`（MygramDB 1.10 以降）を含む `ServerInfo`。
 
 #### get_config()
 
@@ -249,7 +230,7 @@ async def get_replication_status() -> ReplicationStatus
 
 現在のレプリケーション状態を取得します。
 
-**戻り値:** 実行状態と GTID に加え、v1.10 の診断フィールド（報告された状態、CRC エラー、スキーマ整合性、直近の失敗、適用進捗から求めた遅延）を含む `ReplicationStatus`。
+**戻り値:** 実行状態と GTID に加え、診断フィールド（MygramDB 1.10 以降。報告された状態、CRC エラー、スキーマ整合性、直近の失敗、適用進捗から求めた遅延）を含む `ReplicationStatus`。
 
 #### stop_replication()
 
@@ -296,7 +277,9 @@ async def send_command(command: str) -> str
 
 **戻り値:** サーバーからのレスポンス文字列。
 
-#### set_variable() (v1.7+)
+#### set_variable()
+
+MygramDB 1.7 以降が必要です。
 
 ```python
 async def set_variable(name: str, value: str) -> None
@@ -305,7 +288,9 @@ async def set_variable(name: str, value: str) -> None
 ランタイム変数を設定します（MySQL 互換の `SET`）。空白を含む値は自動的に引用符で
 囲まれます。サーバーが拒否した場合は `ProtocolError` を送出します。
 
-#### show_variables() (v1.7+)
+#### show_variables()
+
+MygramDB 1.7 以降が必要です。
 
 ```python
 async def show_variables(like_pattern: Optional[str] = None) -> str
@@ -314,7 +299,9 @@ async def show_variables(like_pattern: Optional[str] = None) -> str
 ランタイム変数の一覧（`SHOW VARIABLES [LIKE <pattern>]`）を生のレスポンス文字列
 として返します。
 
-#### sync() (v1.7+)
+#### sync()
+
+MygramDB 1.7 以降が必要です。
 
 ```python
 async def sync(table: str) -> str
@@ -323,7 +310,9 @@ async def sync(table: str) -> str
 テーブルのオンデマンド完全リロード（`SYNC <table>`）を開始します。テーブル名は
 `database.table` 形式も可。サーバーの受理応答を返します。
 
-#### sync_status() (v1.7+)
+#### sync_status()
+
+MygramDB 1.7 以降が必要です。
 
 ```python
 async def sync_status() -> str
@@ -332,7 +321,9 @@ async def sync_status() -> str
 `SYNC STATUS` レポート（実行中および直近の同期操作）を生のレスポンス文字列として
 返します。
 
-#### sync_stop() (v1.7+)
+#### sync_stop()
+
+MygramDB 1.7 以降が必要です。
 
 ```python
 async def sync_stop(table: Optional[str] = None) -> str
@@ -529,7 +520,7 @@ class ClientConfig:
     connect_timeout: Optional[float] = None   # 接続のデッドライン（None なら timeout）
     command_timeout: Optional[float] = None   # レスポンス全体のデッドライン（None なら timeout）
     max_response_bytes: int = 64 * 1024 * 1024  # 1 レスポンスフレームの上限（0 は無制限）
-    admin_token: str = ""                     # 接続／再接続後に AUTH として送信（v1.10+）
+    admin_token: str = ""                     # 接続／再接続後に AUTH として送信（MygramDB 1.10+）
     recv_buffer_size: int = 65536
     max_query_length: int = 128
     auto_reconnect: bool = False              # 書き込み前に切断を検出したら再接続＋再送
@@ -547,13 +538,9 @@ class ClientConfig:
 を超えたレスポンスは `ProtocolError` を送出して接続を破棄します。超過分のフレーム
 がまだ流れてきている以上、そのソケットは再利用できないためです。
 
-`admin_token` は v1.10 以降、サーバーの TCP リスナーがループバック限定でない場合に
-必須です。TCP 経路はトークンを暗号化しないため、そのリスナーは信頼できるネット
-ワーク内か、TLS を終端するプロキシの背後に置いてください。
+サーバーの TCP リスナーがループバック限定でない場合、`admin_token` が必須です（MygramDB 1.10 以降）。TCP 経路はトークンを暗号化しないため、そのリスナーは信頼できるネットワーク内か、TLS を終端するプロキシの背後に置いてください。
 
-`host` には IPv6 リテラル（例: `"::1"`）や、AAAA レコードのみに解決される
-ホスト名も指定できます。`asyncio.open_connection()` はどちらのアドレス
-ファミリでも同じ方法で解決・接続します（v1.10.2）。
+`host` には IPv6 リテラル（例: `"::1"`）や、AAAA レコードのみに解決されるホスト名も指定できます。`asyncio.open_connection()` はどちらのアドレスファミリでも同じ方法で解決・接続します。
 
 ### SearchOptions
 
@@ -565,12 +552,12 @@ class SearchOptions:
     and_terms: List[str] = field(default_factory=list)
     not_terms: List[str] = field(default_factory=list)
     filters: Dict[str, str] = field(default_factory=dict)          # 等価フィルタ
-    filter_conditions: List[FilterCondition] = field(default_factory=list)  # 比較フィルタ（v1.9+）
-    query_mode: QueryMode = QueryMode.LITERAL     # BOOLEAN は AND/OR/NOT を解釈（v1.10+）
-    sort_column: Optional[str] = None             # BM25 相関には "_score"（v1.6+）。None はプライマリキー
+    filter_conditions: List[FilterCondition] = field(default_factory=list)  # 比較フィルタ（MygramDB 1.9+）
+    query_mode: QueryMode = QueryMode.LITERAL     # BOOLEAN は AND/OR/NOT を解釈（MygramDB 1.10+）
+    sort_column: Optional[str] = None             # BM25 相関には "_score"。None はプライマリキー
     sort_desc: bool = True
-    fuzzy: int = 0                                # レーベンシュタイン距離 0/1/2（v1.6+）
-    highlight: Optional[HighlightOptions] = None  # 設定時に HIGHLIGHT を有効化（v1.6+）
+    fuzzy: int = 0                                # レーベンシュタイン距離 0/1/2
+    highlight: Optional[HighlightOptions] = None  # 設定時に HIGHLIGHT を有効化
 ```
 
 `filters` は `filter_conditions` より先に送信されます。どちらも
@@ -579,7 +566,9 @@ class SearchOptions:
 `sort_column` を指定しない場合、サーバーはプライマリキーの降順で並べるため、
 句が付くのは `sort_desc=False` のとき（`SORT ASC`）だけです。
 
-### QueryMode (v1.10+)
+### QueryMode
+
+MygramDB 1.10 以降が必要です。
 
 ```python
 class QueryMode(str, Enum):
@@ -592,7 +581,9 @@ class QueryMode(str, Enum):
 どの経路でも `LITERAL` が既定なので、`alpha AND beta` の意味が TCP・HTTP・
 型付きクライアントの間で変わることはありません。
 
-### FilterOp (v1.9+)
+### FilterOp
+
+MygramDB 1.9 以降が必要です。
 
 ```python
 class FilterOp(str, Enum):
@@ -604,7 +595,9 @@ class FilterOp(str, Enum):
     LTE = "<="
 ```
 
-### FilterCondition (v1.9+)
+### FilterCondition
+
+MygramDB 1.9 以降が必要です。
 
 ```python
 @dataclass
@@ -618,7 +611,7 @@ class FilterCondition:
 検証され、`value` は検索タームと同じワイヤークォート判定を通ります
 （下記の[ワイヤークォート](#ワイヤークォート)を参照）。
 
-### HighlightOptions (v1.6+)
+### HighlightOptions
 
 ```python
 @dataclass
@@ -631,7 +624,9 @@ class HighlightOptions:
 
 空の `HighlightOptions()` はサーバー既定値でハイライトを有効化します。
 
-### SearchRawOptions (v1.7+)
+### SearchRawOptions
+
+MygramDB 1.7 以降が必要です。
 
 ```python
 @dataclass
@@ -649,10 +644,10 @@ class CountOptions:
     and_terms: List[str] = field(default_factory=list)
     not_terms: List[str] = field(default_factory=list)
     filters: Dict[str, str] = field(default_factory=dict)
-    filter_conditions: List[FilterCondition] = field(default_factory=list)  # v1.9+
+    filter_conditions: List[FilterCondition] = field(default_factory=list)  # MygramDB 1.9+
 ```
 
-### FacetOptions (v1.6+)
+### FacetOptions
 
 ```python
 @dataclass
@@ -661,9 +656,9 @@ class FacetOptions:
     and_terms: List[str] = field(default_factory=list)
     not_terms: List[str] = field(default_factory=list)
     filters: Dict[str, str] = field(default_factory=dict)
-    filter_conditions: List[FilterCondition] = field(default_factory=list)  # v1.9+
+    filter_conditions: List[FilterCondition] = field(default_factory=list)  # MygramDB 1.9+
     limit: int = 0                                       # ファセット値の最大数（0 は無制限）
-    offset: int = 0                                      # スキップする distinct 値の数（v1.9+）
+    offset: int = 0                                      # スキップする distinct 値の数（MygramDB 1.9+）
 ```
 
 ### SearchResponse
@@ -683,7 +678,7 @@ class SearchResponse:
 class SearchResult:
     primary_key: str
     score: Optional[float] = None
-    snippet: Optional[str] = None   # HIGHLIGHT を要求したときのみ設定（v1.6+）
+    snippet: Optional[str] = None   # HIGHLIGHT を要求したときのみ設定
 ```
 
 ### CountResponse
@@ -695,7 +690,7 @@ class CountResponse:
     debug: Optional[DebugInfo] = None
 ```
 
-### FacetValue (v1.6+)
+### FacetValue
 
 ```python
 @dataclass
@@ -704,18 +699,16 @@ class FacetValue:
     count: int
 ```
 
-### FacetResponse (v1.6+)
+### FacetResponse
 
 ```python
 @dataclass
 class FacetResponse:
     results: List[FacetValue] = field(default_factory=list)
-    total_count: int = 0   # OFFSET/LIMIT 適用前の distinct 値の数（v1.9+）
+    total_count: int = 0   # OFFSET/LIMIT 適用前の distinct 値の数（MygramDB 1.9+）
 ```
 
-`results` は返されたページ、`total_count` は distinct 値が全体でいくつあるかを
-示します。ページ件数しか返さない v1.9 未満のサーバーに対しては、`total_count` は
-`len(results)` と同じ値になります。
+`results` は返されたページ、`total_count` は distinct 値が全体でいくつあるかを示します。ページ件数しか返さない 1.9 未満のサーバーに対しては、`total_count` は `len(results)` と同じ値になります。
 
 ### Document
 
@@ -738,14 +731,11 @@ class ServerInfo:
     index_size_bytes: int = 0
     doc_count: int = 0
     tables: List[str] = field(default_factory=list)
-    data_initialized: bool = False  # 全テーブルの初期ロードが完了（v1.10+）
-    ready: bool = False             # トラフィックを受けられる状態（v1.10+）
+    data_initialized: bool = False  # 全テーブルの初期ロードが完了（MygramDB 1.10+）
+    ready: bool = False             # トラフィックを受けられる状態（MygramDB 1.10+）
 ```
 
-`data_initialized` と `ready` は HTTP のヘルスエンドポイントと同じ入力から
-評価されるため、TCP のみの構成でも HTTP をポーリングせずにトラフィックを
-制御できます。これらを報告しない v1.10 未満のサーバーに対しては、どちらも
-`False` になります。
+`data_initialized` と `ready` は HTTP のヘルスエンドポイントと同じ入力から評価されるため、TCP のみの構成でも HTTP をポーリングせずにトラフィックを制御できます。これらを報告しない 1.10 未満のサーバーに対しては、どちらも `False` になります。
 
 ### ReplicationStatus
 
@@ -758,7 +748,7 @@ class ReplicationStatus:
     processed_events: int = 0  # 処理済み binlog イベント総数（複数行レスポンス時）
     queue_size: int = 0        # 適用キュー内の保留イベント数（複数行レスポンス時）
 
-    # 診断フィールド（MygramDB v1.10 以降）
+    # 診断フィールド（MygramDB 1.10 以降）
     state: str = ""                # running | stopped | failed | not_configured
     crc_errors: int = 0            # チェックサム検証に失敗した binlog イベント数
     schema_incompatible: bool = False
@@ -768,7 +758,7 @@ class ReplicationStatus:
     seconds_since_last_applied: Optional[int] = None
 ```
 
-`state` は、要求されて停止したリーダーとエラーで停止したリーダーを区別します。`running` だけでは表現できない差です。未知の値もそのまま渡されるため、将来のサーバーが追加した状態が失われることはありません。v1.10 より前のサーバーが返さないフィールドは既定値のままになります。
+`state` は、要求されて停止したリーダーとエラーで停止したリーダーを区別します。`running` だけでは表現できない差です。未知の値もそのまま渡されるため、将来のサーバーが追加した状態が失われることはありません。1.10 より前のサーバーが返さないフィールドは既定値のままになります。
 
 `seconds_since_last_applied` は監視対象となる遅延です。サーバーが値を返さなかった場合は `None`、まだ 1 件もイベントを適用していない場合はサーバー自身が `-1` を返します。後者は遅延 0 秒ではなく番兵値なので、`last_applied_unixtime != 0` と組み合わせて「まだデータがないサーバー」と「実際に追いついているレプリカ」を区別してください。
 
@@ -894,14 +884,7 @@ class RetryPolicy:
     )
 ```
 
-フルジッター付きの指数バックオフです。`retryable` に含まれる例外のみリトライ
-されます。時間が経てば解消しうる 2 つのサーバー状態、すなわち
-`ServerNotReadyError`（ロード中／未準備）と `ServerBusyError`（レート制限、または
-長時間動作がテーブルを保持中）は既定でリトライ対象です。判定はメッセージ文字列
-ではなくサーバーが返す数値エラーコードに従います（v1.10+）。素の `ServerError`
-（リクエスト形式の誤り）、`InputValidationError`、`ProtocolError` は再送しても結果が
-変わらないためリトライされません。プールでは読み取り専用の委譲 API にのみ
-適用されます。
+フルジッター付きの指数バックオフです。`retryable` に含まれる例外のみリトライされます。時間が経てば解消しうる 2 つのサーバー状態、すなわち `ServerNotReadyError`（ロード中／未準備）と `ServerBusyError`（レート制限、または長時間動作がテーブルを保持中）は既定でリトライ対象です。判定はメッセージ文字列ではなくサーバーが返す数値エラーコードに従います（MygramDB 1.10 以降）。素の `ServerError`（リクエスト形式の誤り）、`InputValidationError`、`ProtocolError` は再送しても結果が変わらないためリトライされません。プールでは読み取り専用の委譲 API にのみ適用されます。
 
 ### CircuitBreakerConfig
 
@@ -985,38 +968,43 @@ class MygramError(Exception):
 ```python
 class ServerError(MygramError):
     message: str
-    error_code: Optional[int]   # v1.10+ の ERROR フレームが持つ数値コード
+    error_code: Optional[int]   # ERROR フレームが持つ数値コード（MygramDB 1.10+）
 
     @property
     def is_transient(self) -> bool
 ```
 
-v1.10 以降、サーバーはすべての `ERROR` フレームに数値コードを付与し、クライアント
-はそれを `error_code` にデコードします。メッセージの文字列一致ではなくコードで
-分岐してください。メッセージは変わりうるものですが、コードはプロトコルの契約です。
-それ以前のサーバーではフレームにコードがなく、`error_code` は `None` になります。
+サーバーはすべての `ERROR` フレームに数値コードを付与し（MygramDB 1.10 以降）、クライアントはそれを `error_code` にデコードします。メッセージの文字列一致ではなくコードで分岐してください。メッセージは変わりうるものですが、コードはプロトコルの契約です。それ以前のサーバーではフレームにコードがなく、`error_code` は `None` になります。
 
 `is_transient` は一時的なサーバー状態を表すコード（`SERVER_LOADING`、
 `SERVER_NOT_READY`、`SERVER_BUSY`）で `True` になります。
 
-### AuthenticationError (v1.10+)
+### AuthenticationError
+
+MygramDB 1.10 以降が必要です。
 
 `AUTH` が拒否された場合、または未認証の接続で管理コマンドを実行した場合に発生
 します（エラーコード `PERMISSION_DENIED`）。`ServerError` を継承しています。
 
-### ServerNotReadyError (v1.10+)
+### ServerNotReadyError
+
+MygramDB 1.10 以降が必要です。
 
 サーバーがまだロード中、またはリクエストを処理できる状態にない場合に発生します
 （エラーコード `SERVER_LOADING`、`SERVER_NOT_READY`）。リトライ可能で、
 `ServerError` を継承しています。
 
-### ServerBusyError (v1.10+)
+### ServerBusyError
+
+MygramDB 1.10 以降が必要です。
 
 サーバーのリクエスト処理能力が一時的に尽きている場合に発生します。レート制限、
 または長時間動作がテーブルを保持している状況です（エラーコード `SERVER_BUSY`）。
 バックオフ後にリトライ可能で、`ServerError` を継承しています。
 
-### ErrorCode (v1.10+)
+### ErrorCode
+
+MygramDB 1.10 以降が必要です。
 
 ```python
 class ErrorCode(IntEnum):
@@ -1069,10 +1057,7 @@ except ServerError as exc:
 def parse_search_expression(expression: str) -> SearchExpression
 ```
 
-Web スタイルの検索式をパースします。プレフィックスなしのタームはすべて
-必須（暗黙の AND、`+` プレフィックスと同じ扱い）です。構文とクォートの
-詳細は[検索式ガイド](search-expression.md)を参照してください（MygramDB
-v1.10.2+）。
+Web スタイルの検索式をパースします。プレフィックスなしのタームはすべて必須（暗黙の AND、`+` プレフィックスと同じ扱い）です。構文とクォートの詳細は[検索式ガイド](search-expression.md)を参照してください。
 
 **パラメータ:**
 - `expression` - 検索式文字列
@@ -1127,7 +1112,9 @@ SearchExpression をクエリ文字列に変換します。
 
 ---
 
-## テーブル識別子ヘルパー (v1.7+)
+## テーブル識別子ヘルパー
+
+MygramDB 1.7 以降が必要です。
 
 ### qualify_table_identity()
 

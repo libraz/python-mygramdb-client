@@ -50,10 +50,10 @@ with `PoolExhaustedError` instead of queueing without bound.
 > Pooled connections are managed with `auto_reconnect` enabled, so a connection
 > that drops between uses heals itself on the next command.
 
-From v1.9 the server reaps its own idle connections (`idle_timeout_sec`). The
-pool's `idle_health_check_interval` (30s by default) probes a connection that
-has been idle at least that long and replaces a reaped one before hand-out, so
-keep it below the server's timeout.
+The server reaps its own idle connections via `idle_timeout_sec` (MygramDB 1.9
+or later). The pool's `idle_health_check_interval` (30s by default) probes a
+connection that has been idle at least that long and replaces a reaped one
+before hand-out, so keep it below the server's timeout.
 
 ## Context Manager Pattern
 
@@ -191,7 +191,8 @@ uses exponential backoff with full jitter and retries connection/timeout errors
 plus the two coded server states that can clear on their own —
 `ServerNotReadyError` (loading / not ready) and `ServerBusyError` (rate limited,
 or a long operation holding the table), both classified from the server's
-numeric error code rather than its message text (v1.10+). Other server
+numeric error code rather than its message text (MygramDB 1.10 or later).
+Other server
 rejections (a plain `ServerError`), input errors (`InputValidationError`) and
 framing errors (`ProtocolError`) are not retried, since resending cannot change
 the outcome.
@@ -508,8 +509,9 @@ results = await client.search('articles', 'test')
 them whether you import the library names or use the builtins. On Python 3.11+,
 `except asyncio.TimeoutError` catches `TimeoutError` as well.
 
-Branch on the server's numeric error code rather than its message (v1.10+) —
-messages are free to change, codes are the protocol contract:
+Branch on the server's numeric error code rather than its message (MygramDB
+1.10 or later) — messages are free to change, codes are the protocol
+contract:
 
 ```python
 from mygramdb_client import (
@@ -527,7 +529,7 @@ except ServerError as exc:
     raise
 ```
 
-Against a pre-v1.10 server the frame is untyped and `error_code` is `None`, so
+Against a pre-1.10 server the frame is untyped and `error_code` is `None`, so
 keep a fallback path if you must support both.
 
 ### 3. Use Appropriate Timeouts
@@ -554,13 +556,14 @@ client = MygramClient(ClientConfig(connect_timeout=0.5, command_timeout=10.0))
 `command_timeout` bounds the whole response, not each socket read, so a server
 that trickles bytes cannot hold a command open past the deadline.
 
-### 4. Set the Admin Token Once (v1.10+)
+### 4. Set the Admin Token Once
 
-A MygramDB v1.10 server whose TCP listener is not loopback-only rejects
-administrative commands until the connection has authenticated. Put the token on
-the config rather than calling `authenticate()` by hand — the config path also
-re-authenticates after a transparent reconnect, so a dropped connection does not
-silently lose administrative access mid-session:
+Requires MygramDB 1.10 or later. A server whose TCP listener is not
+loopback-only rejects administrative commands until the connection has
+authenticated. Put the token on the config rather than calling
+`authenticate()` by hand — the config path also re-authenticates after a
+transparent reconnect, so a dropped connection does not silently lose
+administrative access mid-session:
 
 ```python
 config = ClientConfig(host='localhost', admin_token='...', auto_reconnect=True)

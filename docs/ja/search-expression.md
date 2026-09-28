@@ -1,6 +1,6 @@
 # 検索式
 
-このガイドでは、mygramdb-client がサポートする Web スタイルの検索式構文について説明します。MygramDB 自体の C++ SDK パーサー（`src/client/search_expression.cpp`、v1.10.2+）に準拠しているため、どのクライアントで変換しても同じ意味のクエリになります。
+このガイドでは、mygramdb-client がサポートする Web スタイルの検索式構文について説明します。MygramDB 自体の C++ SDK パーサー（`src/client/search_expression.cpp`）に準拠しているため、どのクライアントで変換しても同じ意味のクエリになります。
 
 ## 概要
 
@@ -18,6 +18,13 @@
 | `(expr)` | グループ化 | `+(tutorial OR guide)` |
 
 句キーワード（`AND`、`OR`、`NOT`、`FILTER`、`SORT`、`LIMIT`、`OFFSET`、`HIGHLIGHT`、`FUZZY`、`FACET`、`ORDER`）と一致するタームは、パーサーがワイヤーに送り出す箇所で自動的にクォートされ、演算子としてではなくリテラルテキストとして一致します: `convert_search_expression('golang not')` は `golang AND "not"` になります。単語内の `+`/`-`（`COVID-19`、`e-mail`、`C++`）はそのまま扱われます。演算子として扱われるのはトークン境界にある `+`/`-` だけです。
+
+![Web 形式の入力 golang "machine learning" -php +(tutorial OR guide) を 4 つの項に分け、サーバーへ送るクエリ golang AND "machine learning" AND (tutorial OR guide) AND NOT php に組み立てる過程を示した図です。](../images/search-expression-ja.svg)
+
+```python
+convert_search_expression('golang "machine learning" -php +(tutorial OR guide)')
+# 'golang AND "machine learning" AND (tutorial OR guide) AND NOT php'
+```
 
 ## 使用例
 

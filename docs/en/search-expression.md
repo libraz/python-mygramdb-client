@@ -1,6 +1,6 @@
 # Search Expression
 
-This guide covers the web-style search expression syntax supported by mygramdb-client. Mirrors MygramDB's own C++ SDK parser (`src/client/search_expression.cpp`, v1.10.2+), so an expression converts to the same query meaning on every client.
+This guide covers the web-style search expression syntax supported by mygramdb-client. Mirrors MygramDB's own C++ SDK parser (`src/client/search_expression.cpp`), so an expression converts to the same query meaning on every client.
 
 ## Overview
 
@@ -18,6 +18,13 @@ The search expression parser converts web-style search expressions into MygramDB
 | `(expr)` | Grouping | `+(tutorial OR guide)` |
 
 A term that collides with a clause keyword (`AND`, `OR`, `NOT`, `FILTER`, `SORT`, `LIMIT`, `OFFSET`, `HIGHLIGHT`, `FUZZY`, `FACET`, `ORDER`) is quoted automatically wherever the parser emits it onto the wire, so it matches as literal text instead of being read as an operator: `convert_search_expression('golang not')` produces `golang AND "not"`. A `+`/`-` inside a word (`COVID-19`, `e-mail`, `C++`) is left alone; only a `+`/`-` at a token boundary is an operator.
+
+![The web-syntax input golang "machine learning" -php +(tutorial OR guide) split into four terms and joined into the server query golang AND "machine learning" AND (tutorial OR guide) AND NOT php.](../images/search-expression.svg)
+
+```python
+convert_search_expression('golang "machine learning" -php +(tutorial OR guide)')
+# 'golang AND "machine learning" AND (tutorial OR guide) AND NOT php'
+```
 
 ## Examples
 

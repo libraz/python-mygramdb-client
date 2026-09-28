@@ -2,6 +2,8 @@
 
 This guide will help you get started with the mygramdb-client Python library.
 
+![A search call passing from the application through the client's validation and wire-quoting steps to the MygramDB server over TCP, with the response decoded on the way back and MySQL feeding the server through binlog replication.](../images/request-path.svg)
+
 ## Installation
 
 ### From GitHub
@@ -200,7 +202,7 @@ async def debug_example():
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `host` | str | "127.0.0.1" | Server hostname, IPv4 literal, or IPv6 literal (e.g. `"::1"`, v1.10.2+) |
+| `host` | str | "127.0.0.1" | Server hostname, IPv4 literal, or IPv6 literal (e.g. `"::1"`) |
 | `port` | int | 11016 | Server port |
 | `socket_path` | str | "" | Unix socket path; overrides host/port when set |
 | `timeout` | float | 5.0 | Default timeout (seconds) for connect and per-command reads |
@@ -244,54 +246,42 @@ async def error_handling_example():
         await client.disconnect()
 ```
 
-## MygramDB v1.8 Notes
+## Compatibility Notes
 
-Two wire-protocol behaviors matter when targeting a MygramDB v1.8 server:
+`search_raw()` sends its expression unquoted, so the server parses `AND` /
+`OR` / `NOT` and parenthesized grouping — including OR groups nested under
+AND (MygramDB 1.8 or later). Build the expression with
+`convert_search_expression()`; control characters are rejected before the
+query is sent, so the unquoted transport stays injection-safe.
 
-- **Verbatim boolean transport.** `search_raw()` sends its expression unquoted,
-  so the server parses `AND` / `OR` / `NOT` and parenthesized grouping —
-  including OR groups nested under AND. Build the expression with
-  `convert_search_expression()`; control characters are still rejected before
-  the query is sent, so the unquoted transport stays injection-safe.
-- **FACET `#` values.** A `facet()` value that starts with `#` is preserved:
-  only tab-less `#` lines in the FACET response are treated as comments, so a
-  legitimate `#tag`-style value (which carries a tab before its count) is kept.
+A `facet()` value that starts with `#` is preserved (MygramDB 1.8 or later):
+only tab-less `#` lines in the FACET response are treated as comments, so a
+legitimate `#tag`-style value, which carries a tab before its count, is kept.
 
-## MygramDB v1.10 Notes
+Administrative commands require a token (MygramDB 1.10 or later) when the
+server's TCP listener is not loopback-only. Set `ClientConfig.admin_token`;
+the client then issues `AUTH` on connect and on every transparent reconnect.
+Without it, administrative commands fail with `AuthenticationError`. The TCP
+transport does not encrypt the token, so keep that listener on a trusted
+network or behind a terminating proxy.
 
-Two server changes need attention when upgrading a deployment:
+Errors carry a numeric code (MygramDB 1.10 or later). Branch on
+`ServerError.error_code` (see `ErrorCode`) rather than matching message text.
+`ServerNotReadyError` and `ServerBusyError` mark states that a retry may
+clear, and `RetryPolicy` retries them by default.
 
-- **Administrative commands require a token.** If the server's TCP listener is
-  not loopback-only, set `ClientConfig.admin_token`. The client then issues
-  `AUTH` on connect and on every transparent reconnect; without it,
-  administrative commands fail with `AuthenticationError`. The TCP transport
-  does not encrypt the token, so keep that listener on a trusted network or
-  behind a terminating proxy.
-- **Errors carry a numeric code.** Branch on `ServerError.error_code` (see
-  `ErrorCode`) rather than matching message text. `ServerNotReadyError` and
-  `ServerBusyError` mark states that a retry may clear, and `RetryPolicy`
-  retries them by default.
-
-MygramDB v1.9 (facet pagination via `FacetOptions.offset` /
-`FacetResponse.total_count`, and comparison filters via `filter_conditions`),
-v1.7 (multi-database, `search_raw`, runtime variables, on-demand sync) and v1.6
-(fuzzy search, highlight, facets, BM25) remain supported.
-
-## MygramDB v1.10.2 Notes
+## Wire Protocol Notes
 
 Every wire-bound string (search text, AND/NOT terms, filter values, `SET`/
-`SHOW VARIABLES LIKE`/`DUMP` arguments) now goes through one shared quoting
+`SHOW VARIABLES LIKE`/`DUMP` arguments) goes through one shared quoting
 decision that also quotes on Unicode whitespace (e.g. the full-width space
-U+3000, no-break space U+00A0) and on a case-insensitive clause keyword —
-this client already applied the same rule to ASCII whitespace and quote
-characters, so no caller-visible change follows unless a query previously
-relied on unquoted Unicode whitespace splitting into multiple terms. See
+U+3000, no-break space U+00A0) and on a case-insensitive clause keyword. See
 [Wire quoting](api-reference.md#wire-quoting).
 
-`simplify_search_expression()` now raises `ValueError` for an OR or
-parenthesized sub-expression instead of synthesizing a `main_term` that lost
-the OR/grouping meaning once quoted; use `convert_search_expression()` with
-`search_raw()` for those. See the [Search Expression guide](search-expression.md).
+`simplify_search_expression()` raises `ValueError` for an OR or parenthesized
+sub-expression, since quoting would collapse the OR/grouping meaning; use
+`convert_search_expression()` with `search_raw()` for those. See the
+[Search Expression guide](search-expression.md).
 
 A SEARCH result's primary key containing whitespace is decoded from its
 quoted wire form; `ClientConfig.host` accepts an IPv6 literal.

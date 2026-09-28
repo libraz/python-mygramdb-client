@@ -41,7 +41,7 @@ async with MygramPool(ClientConfig(host='localhost')) as pool:
 
 > プール管理下の接続は `auto_reconnect` が有効な状態で扱われるため、使用の合間に切れた接続は次のコマンドで自己修復します。
 
-v1.9 以降、サーバーはアイドル接続を自ら回収します（`idle_timeout_sec`）。プールの `idle_health_check_interval`（既定 30 秒）はその時間以上アイドルだった接続を払い出し前にプローブし、回収済みなら差し替えるため、サーバー側のタイムアウトより短く設定してください。
+サーバーは `idle_timeout_sec` によりアイドル接続を自ら回収します（MygramDB 1.9 以降）。プールの `idle_health_check_interval`（既定 30 秒）はその時間以上アイドルだった接続を払い出し前にプローブし、回収済みなら差し替えるため、サーバー側のタイムアウトより短く設定してください。
 
 ## コンテキストマネージャパターン
 
@@ -172,7 +172,7 @@ async def main():
 
 ## リトライロジック
 
-`RetryPolicy` をプールに渡すと、読み取り系の委譲 API（`search` / `count` / `get` / `facet` / `info`）に自動リトライが適用されます。指数バックオフ + full jitter で待機し、リトライ対象は接続・タイムアウト系のエラーに加えて、時間が経てば解消しうる 2 つのサーバー状態、すなわち `ServerNotReadyError`（ロード中／未準備）と `ServerBusyError`（レート制限、または長時間動作がテーブルを保持中）です。どちらもメッセージ文字列ではなくサーバーが返す数値エラーコードから判定します（v1.10+）。それ以外のサーバー拒否（素の `ServerError`）、入力不正の `InputValidationError`、フレーミング不整合の `ProtocolError` は再送しても結果が変わらないためリトライしません。
+`RetryPolicy` をプールに渡すと、読み取り系の委譲 API（`search` / `count` / `get` / `facet` / `info`）に自動リトライが適用されます。指数バックオフ + full jitter で待機し、リトライ対象は接続・タイムアウト系のエラーに加えて、時間が経てば解消しうる 2 つのサーバー状態、すなわち `ServerNotReadyError`（ロード中／未準備）と `ServerBusyError`（レート制限、または長時間動作がテーブルを保持中）です。どちらもメッセージ文字列ではなくサーバーが返す数値エラーコードから判定します（MygramDB 1.10 以降）。それ以外のサーバー拒否（素の `ServerError`）、入力不正の `InputValidationError`、フレーミング不整合の `ProtocolError` は再送しても結果が変わらないためリトライしません。
 
 ```python
 from mygramdb_client import MygramPool, ClientConfig, PoolConfig, RetryPolicy
@@ -475,7 +475,7 @@ results = await client.search('articles', 'test')
 インポートしても組み込みを使っても、上記のハンドラで捕捉できます。
 Python 3.11+ では `except asyncio.TimeoutError` でも `TimeoutError` を捕捉できます。
 
-分岐はメッセージ文字列ではなくサーバーの数値エラーコードで行ってください（v1.10+）。メッセージは変わりうるものですが、コードはプロトコルの契約です。
+分岐はメッセージ文字列ではなくサーバーの数値エラーコードで行ってください（MygramDB 1.10 以降）。メッセージは変わりうるものですが、コードはプロトコルの契約です。
 
 ```python
 from mygramdb_client import (
@@ -493,7 +493,7 @@ except ServerError as exc:
     raise
 ```
 
-v1.10 未満のサーバーではフレームにコードがなく `error_code` は `None` になるため、両方をサポートする必要があるならフォールバック経路を残してください。
+1.10 未満のサーバーではフレームにコードがなく `error_code` は `None` になるため、両方をサポートする必要があるならフォールバック経路を残してください。
 
 ### 3. 適切なタイムアウトを設定する
 
@@ -517,9 +517,9 @@ client = MygramClient(ClientConfig(connect_timeout=0.5, command_timeout=10.0))
 
 `command_timeout` はソケット読み取りごとではなくレスポンス全体を対象とするため、少しずつバイトを流し続けるサーバーがデッドラインを超えてコマンドを保持することはありません。
 
-### 4. 管理トークンは設定に一度だけ書く（v1.10+）
+### 4. 管理トークンは設定に一度だけ書く
 
-TCP リスナーがループバック限定でない MygramDB v1.10 サーバーは、認証済みの接続でなければ管理コマンドを拒否します。`authenticate()` を手で呼ぶのではなく、設定にトークンを持たせてください。設定経由なら透過的な再接続後にも再認証されるため、接続が切れてもセッション途中で管理権限を失いません。
+MygramDB 1.10 以降が必要です。TCP リスナーがループバック限定でないサーバーは、認証済みの接続でなければ管理コマンドを拒否します。`authenticate()` を手で呼ぶのではなく、設定にトークンを持たせてください。設定経由なら透過的な再接続後にも再認証されるため、接続が切れてもセッション途中で管理権限を失いません。
 
 ```python
 config = ClientConfig(host='localhost', admin_token='...', auto_reconnect=True)
