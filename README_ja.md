@@ -13,11 +13,11 @@
 
 ## 概要
 
-MygramDB は MySQL FULLTEXT の **25〜200倍高速** な全文検索を提供します。このクライアントは MygramDB の TCP テキストプロトコル（memcached スタイル）で通信し、外部依存はゼロです。
+MygramDB は、ディスク上の MySQL FULLTEXT インデックスではなくメモリから全文検索に応答します。どれだけ速くなるかはクエリとデータセット次第で、実測値と測定条件は[公開ベンチマーク](https://mygramdb.libraz.net/ja/benchmarks)に載せています。このクライアントは MygramDB の TCP テキストプロトコル（memcached スタイル）で通信し、外部依存はゼロです。
 
 | | MySQL FULLTEXT | MygramDB |
 |---|---|---|
-| **検索速度** | ベースライン | 25〜200倍高速 |
+| **検索速度** | ベースライン | [実測値](https://mygramdb.libraz.net/ja/benchmarks) |
 | **ストレージ** | ディスク | インメモリ |
 | **レプリケーション** | — | MySQL binlog |
 | **プロトコル** | MySQL | TCP（memcached スタイル） |

@@ -2,7 +2,8 @@
 MygramDB Client for Python.
 
 A high-performance Python client for MygramDB - an in-memory full-text search engine
-that is 25-200x faster than MySQL FULLTEXT with MySQL replication support.
+that answers queries from memory rather than an on-disk MySQL FULLTEXT index,
+kept in sync by MySQL replication.
 
 Example usage:
     from mygramdb_client import MygramClient, ClientConfig, SearchOptions
