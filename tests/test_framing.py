@@ -127,6 +127,156 @@ class TestChunkBoundaryReassembly:
                 await client.disconnect()
 
 
+class TestDebugAndHighlightChunkedDelivery:
+    """
+    A HIGHLIGHT+DEBUG response delivered in separate chunks must not be
+    mistaken for complete at either chunk boundary: right after the header
+    (before the highlight rows and debug block arrive), and right after the
+    debug block's own opening blank line (before "# DEBUG" itself arrives,
+    which by itself looks like a "blank line" terminator).
+    """
+
+    async def test_highlight_with_debug_split_before_debug_marker(self):
+        async def handle(reader, writer):
+            try:
+                while True:
+                    line = await reader.readline()
+                    if not line:
+                        return
+                    command = line.decode("utf-8").strip()
+                    if command.upper() == "DEBUG ON":
+                        writer.write(b"OK DEBUG_ON\r\n")
+                        await writer.drain()
+                        continue
+                    if command.upper().startswith("SEARCH"):
+                        # First chunk ends right after the blank line that
+                        # opens the debug block -- before "# DEBUG" itself
+                        # arrives. This is the exact byte pattern a naive
+                        # "ends with a blank line" check mistakes for the
+                        # frame's real end.
+                        writer.write(b"OK RESULTS 1\r\npk1\thello <em>x</em>\r\n\r\n")
+                        await writer.drain()
+                        await asyncio.sleep(0.05)
+                        writer.write(
+                            b"# DEBUG\r\n"
+                            b"query_time: 1.5ms\r\n"
+                            b"index_time: 0.5ms\r\n"
+                            b"terms: 1\r\n"
+                            b"ngrams: 2\r\n"
+                            b"final: 1\r\n"
+                            b"cache: miss\r\n"
+                            b"\r\n"
+                        )
+                        await writer.drain()
+                        continue
+                    writer.write(b"ERROR unknown command\r\n")
+                    await writer.drain()
+            finally:
+                # Closing the server-side transport on EOF (matching
+                # FakeMygramServer) lets asyncio.Server.wait_closed() below
+                # resolve once the client disconnects.
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            client = MygramClient(ClientConfig(host="127.0.0.1", port=port))
+            await client.connect()
+            try:
+                await client.enable_debug()
+                result = await client.search_with_highlights("articles", "x")
+                assert result.total_count == 1
+                assert result.results[0].primary_key == "pk1"
+                assert result.results[0].snippet == "hello <em>x</em>"
+                # If the client had stopped reading at the first chunk, the
+                # debug block would never have been parsed.
+                assert result.debug is not None
+                assert result.debug.query_time_ms == 1.5
+                assert result.debug.terms == 1
+            finally:
+                await client.disconnect()
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    async def test_classic_search_with_debug_split_at_header(self):
+        async def handle(reader, writer):
+            try:
+                while True:
+                    line = await reader.readline()
+                    if not line:
+                        return
+                    command = line.decode("utf-8").strip()
+                    if command.upper() == "DEBUG ON":
+                        writer.write(b"OK DEBUG_ON\r\n")
+                        await writer.drain()
+                        continue
+                    if command.upper().startswith("SEARCH"):
+                        # First chunk is exactly the classic header line --
+                        # looks like a complete single-line response unless
+                        # the client knows debug mode means a tail is still
+                        # coming.
+                        writer.write(b"OK RESULTS 1 pk1")
+                        await writer.drain()
+                        await asyncio.sleep(0.05)
+                        writer.write(
+                            b"\r\n\r\n# DEBUG\r\n"
+                            b"query_time: 2.0ms\r\n"
+                            b"index_time: 1.0ms\r\n"
+                            b"terms: 1\r\n"
+                            b"ngrams: 2\r\n"
+                            b"final: 1\r\n"
+                            b"cache: miss\r\n"
+                            b"\r\n"
+                        )
+                        await writer.drain()
+                        continue
+                    writer.write(b"ERROR unknown command\r\n")
+                    await writer.drain()
+            finally:
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            client = MygramClient(ClientConfig(host="127.0.0.1", port=port))
+            await client.connect()
+            try:
+                await client.enable_debug()
+                result = await client.search("articles", "x")
+                assert result.total_count == 1
+                assert result.results[0].primary_key == "pk1"
+                assert result.debug is not None
+                assert result.debug.query_time_ms == 2.0
+            finally:
+                await client.disconnect()
+        finally:
+            server.close()
+            await server.wait_closed()
+
+
+class TestIPv6Connectivity:
+    """A server reachable only via an IPv6 literal is reachable (v1.10.2)."""
+
+    async def test_connect_and_round_trip_over_ipv6_loopback(self):
+        async with FakeMygramServer(host="::1") as server:
+            client = MygramClient(ClientConfig(host=server.host, port=server.port))
+            await client.connect()
+            try:
+                assert client.is_connected()
+                result = await client.search("articles", "x")
+                assert result.total_count == 1
+                assert result.results[0].primary_key == "pk1"
+            finally:
+                await client.disconnect()
+
+
 class TestResponseBounds:
     """A response that never completes must not hold the command open (v1.10+)."""
 

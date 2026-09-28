@@ -4,6 +4,7 @@ from typing import Dict, List, Optional
 
 from .errors import InputValidationError
 from .types import FilterCondition, FilterOp, HighlightOptions
+from .wire_quoting import quote_wire_token
 
 # Control characters: 0x00-0x1F and 0x7F
 CONTROL_CHAR_PATTERN = re.compile(r'[\x00-\x1f\x7f]')
@@ -14,24 +15,6 @@ _IDENTIFIER_WHITESPACE = (" ", "\t", "\n", "\r", "\v", "\f")
 # Characters that would end an unquoted identifier's token or change the
 # tokenizer's quote/escape state, so they cannot appear in a bare identifier
 _IDENTIFIER_DELIMITERS = ('"', "'", "\\")
-
-# Characters that force a value to be quoted on the wire
-_QUOTE_TRIGGER_CHARS = frozenset({" ", "\t", "\n", "\r", '"', "'"})
-
-# Command arguments are quoted on a lone backslash as well, since it is the
-# tokenizer's escape character.
-_COMMAND_QUOTE_TRIGGER_CHARS = _QUOTE_TRIGGER_CHARS | {"\\"}
-
-# A query token also carries the expression parser's grouping syntax, so a
-# parenthesis (and the escape character) forces quoting there too.
-_QUERY_QUOTE_TRIGGER_CHARS = _COMMAND_QUOTE_TRIGGER_CHARS | {"(", ")"}
-
-# Words the server reads as the start of a clause. A literal query term equal
-# to one of them is quoted so it matches as text instead of opening a clause.
-_CLAUSE_KEYWORDS = frozenset({
-    "AND", "OR", "NOT", "FILTER", "SORT", "LIMIT", "OFFSET",
-    "HIGHLIGHT", "FUZZY", "FACET", "ORDER",
-})
 
 # Maximum byte length for HIGHLIGHT open_tag / close_tag values. Mirrors the
 # server-side cap (kMaxHighlightTagLength) introduced to prevent response-size
@@ -81,85 +64,28 @@ def validate_identifier(value: str, field_name: str) -> None:
             )
 
 
-def _quote_token_if_needed(
-    value: str,
-    trigger_chars: frozenset,
-    quote_clause_keywords: bool = False,
-) -> str:
-    """
-    Wrap a value in double quotes when it would otherwise be read as something
-    other than one literal token, escaping the characters that are special
-    inside a quoted token.
-
-    Mirrors the C++ client's ``EscapeQueryString`` / ``QuoteCommandArgumentIfNeeded``:
-    a value is quoted when it is empty, contains one of ``trigger_chars``, or —
-    for a query token — spells a clause keyword. Inside the quotes, ``"`` and
-    ``\\`` are backslash-escaped and any remaining control characters
-    (code < 0x20) are dropped. Values that need no quoting are returned
-    verbatim so simple single-token queries stay byte-identical on the wire.
-
-    Args:
-        value: Value to quote (already control-char validated by the caller).
-        trigger_chars: Characters whose presence forces quoting.
-        quote_clause_keywords: Whether a value spelling a clause keyword
-            (``AND``, ``LIMIT``, ...) forces quoting.
-
-    Returns:
-        Wire-safe single token.
-    """
-    if value == "":
-        return '""'
-
-    needs_quotes = any(ch in trigger_chars for ch in value)
-    if not needs_quotes and quote_clause_keywords:
-        needs_quotes = value.upper() in _CLAUSE_KEYWORDS
-    if not needs_quotes:
-        return value
-
-    out = ['"']
-    for ch in value:
-        if ord(ch) < 0x20:
-            # Drop control characters to prevent command injection.
-            continue
-        if ch == '"' or ch == "\\":
-            out.append("\\")
-        out.append(ch)
-    out.append('"')
-    return "".join(out)
-
-
 def escape_query_string(value: str) -> str:
     """
     Quote and escape a free-form value for use as a wire token.
 
-    Empty strings are emitted as the explicit ``""`` token to keep the wire
-    form unambiguous: an unquoted empty arg would collapse into surrounding
-    whitespace and produce a malformed command (e.g. ``SEARCH table  AND foo``).
-
-    Values containing whitespace, a quote, a backslash or a parenthesis are
-    wrapped in double quotes with internal quotes/backslashes escaped, as is a
-    value that spells a clause keyword (``AND``, ``LIMIT``, ...) — unquoted it
-    would open a clause or a boolean group instead of matching as text.
-    Control characters are stripped to prevent command injection. Matches the
-    C++ client's ``EscapeQueryString``.
+    Delegates to the shared :func:`~.wire_quoting.quote_wire_token` decision,
+    the single quoting rule every wire-bound string in this client goes
+    through: empty, a reserved clause keyword, ASCII/Unicode whitespace, a
+    quote, a backslash or a parenthesis forces quoting; a forced-quoted value
+    escapes ``\\``/``"``/``\\r``/``\\n``/``\\t`` and any other control byte as
+    ``\\xHH``. Matches the C++ client's ``EscapeQueryString``.
     """
-    return _quote_token_if_needed(
-        value, _QUERY_QUOTE_TRIGGER_CHARS, quote_clause_keywords=True
-    )
+    return quote_wire_token(value)
 
 
 def quote_command_argument(value: str, field_name: str) -> str:
     """
     Quote a free-form command argument (e.g. a ``SET`` value, a
-    ``SHOW VARIABLES LIKE`` pattern or a ``DUMP`` filepath) when it contains
-    whitespace or quote characters. Mirrors the C++ client's
-    ``QuoteCommandArgumentIfNeeded``.
-
-    Unlike :func:`escape_query_string`, a clause keyword or a parenthesis is
-    left unquoted (an argument is never read as query text) and the value is
-    validated for control characters, which would otherwise be silently
-    dropped. An empty value is allowed and surfaced as the explicit empty
-    token ``""``.
+    ``SHOW VARIABLES LIKE`` pattern or a ``DUMP`` filepath). Same quoting
+    decision as :func:`escape_query_string` (mirrors the C++ client's
+    ``QuoteCommandArgumentIfNeeded``, which now delegates to the same shared
+    helper); the value is additionally validated for control characters
+    before quoting, which would otherwise be silently escaped away.
 
     Args:
         value: Argument value.
@@ -173,7 +99,7 @@ def quote_command_argument(value: str, field_name: str) -> str:
     """
     if value != "":
         ensure_safe_command_value(value, field_name)
-    return _quote_token_if_needed(value, _COMMAND_QUOTE_TRIGGER_CHARS)
+    return quote_wire_token(value)
 
 
 def qualify_table_identity(table: str, database: Optional[str] = None) -> str:

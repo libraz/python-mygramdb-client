@@ -281,11 +281,13 @@ class TestEscapeQueryString:
         # Single quotes also force quoting (server tokenizer)
         assert escape_query_string("it's") == "\"it's\""
 
-    def test_control_chars_stripped_when_quoted(self):
-        # When quoting is forced, control chars are dropped to prevent injection
+    def test_other_control_chars_escaped_as_hex_when_quoted(self):
+        # A control char with no dedicated escape (\r, \n, \t) is reversibly
+        # escaped as \xHH rather than dropped, matching the C++ client's
+        # QuoteWireToken and ParseWireToken's inverse.
         result = escape_query_string("a\x00b c")
         assert "\x00" not in result
-        assert result == '"ab c"'
+        assert result == '"a\\x00b c"'
 
     def test_backslash_escaped(self):
         assert escape_query_string('a\\b c') == '"a\\\\b c"'

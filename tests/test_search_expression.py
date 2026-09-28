@@ -1,4 +1,11 @@
-"""Tests for search expression parser."""
+"""
+Tests for the web-style search expression parser.
+
+Mirrors mygram-db's tests/client/search_expression_test.cpp: unprefixed
+terms are required (implicit AND), a parenthesized group after +/- stays one
+required/excluded entry, and a literal term colliding with a clause keyword
+is quoted through the shared wire-quoting decision.
+"""
 import pytest
 
 from mygramdb_client.search_expression import (
@@ -11,7 +18,7 @@ from mygramdb_client.search_expression import (
 
 
 class TestParseSearchExpression:
-    """Tests for parse_search_expression function."""
+    """Tests for parse_search_expression."""
 
     def test_empty_expression_raises_error(self):
         with pytest.raises(ValueError, match="cannot be empty"):
@@ -21,42 +28,104 @@ class TestParseSearchExpression:
         with pytest.raises(ValueError, match="cannot be empty"):
             parse_search_expression("   ")
 
-    def test_single_word(self):
+    def test_single_word_is_required(self):
         result = parse_search_expression("golang")
-        assert result.optional_terms == ["golang"]
-        assert result.required_terms == []
+        assert result.required_terms == ["golang"]
         assert result.excluded_terms == []
+        assert result.optional_terms == []
 
-    def test_multiple_words(self):
+    def test_multiple_words_are_implicit_and(self):
         result = parse_search_expression("golang tutorial")
-        assert result.optional_terms == ["golang", "tutorial"]
+        assert result.required_terms == ["golang", "tutorial"]
 
     def test_required_term_with_plus(self):
         result = parse_search_expression("+golang")
         assert result.required_terms == ["golang"]
-        assert result.optional_terms == []
 
     def test_excluded_term_with_minus(self):
-        result = parse_search_expression("-deprecated")
-        assert result.excluded_terms == ["deprecated"]
+        result = parse_search_expression("-old")
+        assert result.required_terms == []
+        assert result.excluded_terms == ["old"]
 
-    def test_mixed_terms(self):
-        result = parse_search_expression("+golang tutorial -deprecated")
+    def test_multiple_required_terms(self):
+        result = parse_search_expression("+golang +tutorial +2024")
+        assert result.required_terms == ["golang", "tutorial", "2024"]
+
+    def test_required_and_excluded(self):
+        result = parse_search_expression("+golang -old")
         assert result.required_terms == ["golang"]
-        assert result.optional_terms == ["tutorial"]
-        assert result.excluded_terms == ["deprecated"]
+        assert result.excluded_terms == ["old"]
 
-    def test_quoted_phrase(self):
-        result = parse_search_expression('"machine learning"')
-        assert result.optional_terms == ['"machine learning"']
+    def test_or_expression_is_complex(self):
+        result = parse_search_expression("python OR ruby")
+        assert has_complex_expression(result)
+        assert result.raw_expression != ""
+        assert result.required_terms == []
+        assert result.excluded_terms == []
 
-    def test_required_quoted_phrase(self):
-        result = parse_search_expression('+"machine learning"')
-        assert result.required_terms == ['"machine learning"']
+    @pytest.mark.parametrize("term", ["ORANGE", "ORDER", "FLOOR", "orchestra"])
+    def test_or_substring_inside_ordinary_word_is_not_complex(self, term):
+        result = parse_search_expression(term)
+        assert not has_complex_expression(result)
+        assert result.required_terms == [term]
 
-    def test_excluded_quoted_phrase(self):
-        result = parse_search_expression('-"old version"')
-        assert result.excluded_terms == ['"old version"']
+    def test_parenthesized_expression_is_complex(self):
+        result = parse_search_expression("(tutorial OR guide)")
+        assert has_complex_expression(result)
+        assert result.raw_expression != ""
+
+    def test_required_with_parenthesized_or(self):
+        result = parse_search_expression("+golang +(tutorial OR guide)")
+        assert result.required_terms[0] == "golang"
+        assert has_complex_expression(result)
+
+    def test_complex_expression(self):
+        result = parse_search_expression(
+            "+golang +(tutorial OR guide) -old -deprecated"
+        )
+        assert result.required_terms[0] == "golang"
+        assert result.excluded_terms == ["old", "deprecated"]
+        assert has_complex_expression(result)
+
+    def test_whitespace_handling(self):
+        result = parse_search_expression("  +golang   -old   tutorial  ")
+        assert result.required_terms == ["golang", "tutorial"]
+        assert result.excluded_terms == ["old"]
+
+    def test_japanese_terms(self):
+        result = parse_search_expression("+日本語 -古い チュートリアル")
+        assert result.required_terms == ["日本語", "チュートリアル"]
+        assert result.excluded_terms == ["古い"]
+
+    def test_quoted_phrase_stored_as_plain_text(self):
+        result = parse_search_expression('"machine learning" tutorial')
+        assert result.required_terms == ["machine learning", "tutorial"]
+        assert to_query_string(result) == '"machine learning" AND tutorial'
+
+    def test_quoted_phrase_with_exclusion(self):
+        result = parse_search_expression('"deep learning" -tensorflow')
+        assert result.required_terms == ["deep learning"]
+        assert result.excluded_terms == ["tensorflow"]
+        assert to_query_string(result) == '"deep learning" AND NOT tensorflow'
+
+    def test_quoted_phrase_with_or(self):
+        result = parse_search_expression('"machine learning" OR "deep learning"')
+        assert has_complex_expression(result)
+        assert '"machine learning"' in result.raw_expression
+        assert '"deep learning"' in result.raw_expression
+
+    def test_fullwidth_space_delimiter(self):
+        result = parse_search_expression("golang　tutorial")
+        assert result.required_terms == ["golang", "tutorial"]
+
+    def test_mixed_ascii_and_fullwidth_spaces(self):
+        result = parse_search_expression("golang tutorial　日本語")
+        assert result.required_terms == ["golang", "tutorial", "日本語"]
+
+    def test_nbsp_is_a_separator(self):
+        # U+00A0 (no-break space): a token boundary just like an ASCII space.
+        result = parse_search_expression("golang tutorial")
+        assert result.required_terms == ["golang", "tutorial"]
 
     def test_unterminated_quote_raises_error(self):
         with pytest.raises(ValueError, match="Unterminated quoted string"):
@@ -70,137 +139,140 @@ class TestParseSearchExpression:
         with pytest.raises(ValueError, match="Expected term after"):
             parse_search_expression("-")
 
-    def test_or_operator_marks_complex(self):
-        result = parse_search_expression("python OR ruby")
+    def test_unbalanced_parens_raises_error(self):
+        with pytest.raises(ValueError, match="Unbalanced"):
+            parse_search_expression("(golang tutorial")
+
+    @pytest.mark.parametrize("term", ["COVID-19", "e-mail", "UTF-8", "C++"])
+    def test_plus_and_minus_inside_terms_are_literal_text(self, term):
+        result = parse_search_expression(term)
+        assert result.required_terms == [term]
+        assert result.excluded_terms == []
+        assert convert_search_expression(term) == term
+
+    def test_leading_plus_and_minus_remain_unary_operators(self):
+        result = parse_search_expression("+COVID-19 -e-mail C++")
+        assert result.required_terms == ["COVID-19", "C++"]
+        assert result.excluded_terms == ["e-mail"]
+
+    @pytest.mark.parametrize(
+        "expression", ["a OR -b", "a b OR", "foo OR"]
+    )
+    def test_malformed_or_chains_are_rejected(self, expression):
+        with pytest.raises(ValueError):
+            convert_search_expression(expression)
+
+    @pytest.mark.parametrize(
+        "expression",
+        ["a OR (b c", "a OR (b OR", "(a OR", 'a OR "unterminated'],
+    )
+    def test_errors_inside_or_capture_propagate(self, expression):
+        # An error raised while capturing an OR chain (unbalanced parens
+        # after OR, an unterminated quote reached from inside OR) must
+        # surface as ValueError from the top-level call, not be swallowed.
+        with pytest.raises(ValueError):
+            convert_search_expression(expression)
+
+    @pytest.mark.parametrize("term", ["OR", "or", "Or", "oR"])
+    def test_or_is_recognized_case_insensitively_as_a_whole_word(self, term):
+        result = parse_search_expression(f"python {term} ruby")
+        assert has_complex_expression(result)
         assert result.raw_expression == "python OR ruby"
 
-    def test_parentheses_marks_complex(self):
-        result = parse_search_expression("(golang tutorial)")
-        assert result.raw_expression == "(golang tutorial)"
-
-    def test_fullwidth_space_normalization(self):
-        # Full-width space U+3000
-        result = parse_search_expression("golang\u3000tutorial")
-        assert result.optional_terms == ["golang", "tutorial"]
+    def test_apostrophe_inside_term_is_literal(self):
+        result = parse_search_expression("don't stop")
+        assert result.required_terms == ["don't", "stop"]
+        assert convert_search_expression("don't stop") == '"don\'t" AND stop'
 
 
 class TestHasComplexExpression:
-    """Tests for has_complex_expression function."""
+    """Tests for has_complex_expression."""
 
     def test_simple_expression_is_not_complex(self):
-        expr = parse_search_expression("golang tutorial")
-        assert has_complex_expression(expr) is False
+        assert not has_complex_expression(parse_search_expression("golang tutorial"))
 
     def test_or_expression_is_complex(self):
-        expr = parse_search_expression("python OR ruby")
-        assert has_complex_expression(expr) is True
+        assert has_complex_expression(parse_search_expression("python OR ruby"))
 
     def test_parentheses_expression_is_complex(self):
-        expr = parse_search_expression("(golang tutorial)")
-        assert has_complex_expression(expr) is True
+        assert has_complex_expression(parse_search_expression("(golang tutorial)"))
 
 
 class TestToQueryString:
-    """Tests for to_query_string function."""
-
-    def test_optional_terms_joined_with_or(self):
-        expr = parse_search_expression("python ruby")
-        result = to_query_string(expr)
-        assert result == "python OR ruby"
+    """Tests for to_query_string."""
 
     def test_required_terms_joined_with_and(self):
-        expr = parse_search_expression("+golang +tutorial")
-        result = to_query_string(expr)
+        result = to_query_string(parse_search_expression("+golang +tutorial"))
         assert result == "golang AND tutorial"
 
     def test_excluded_terms_prefixed_with_not(self):
-        expr = parse_search_expression("-deprecated -old")
-        result = to_query_string(expr)
-        assert result == "NOT deprecated AND NOT old"
+        result = to_query_string(parse_search_expression("+golang -old"))
+        assert result == "golang AND NOT old"
 
-    def test_mixed_terms(self):
-        expr = parse_search_expression("+golang tutorial -deprecated")
-        result = to_query_string(expr)
-        # Required first, then optional (as AND since required exists), then NOT
-        assert "golang" in result
-        assert "tutorial" in result
-        assert "NOT deprecated" in result
+    def test_unprefixed_terms_are_implicit_and(self):
+        result = to_query_string(parse_search_expression("python ruby"))
+        assert result == "python AND ruby"
+
+    def test_wraps_or_subexpression_in_parens(self):
+        result = convert_search_expression("python OR ruby")
+        assert result == "(python OR ruby)"
+
+    def test_parenthesized_implicit_and_preserves_whitespace(self):
+        assert convert_search_expression("+(machine learning)") == "(machine learning)"
+        assert (
+            convert_search_expression('+(a "quoted phrase" b)')
+            == '(a "quoted phrase" b)'
+        )
 
 
 class TestConvertSearchExpression:
-    """Tests for convert_search_expression function."""
+    """Tests for convert_search_expression."""
 
     def test_simple_conversion(self):
-        result = convert_search_expression("+golang tutorial")
+        result = convert_search_expression("+golang -old")
         assert "golang" in result
-        assert "tutorial" in result
+        assert "NOT old" in result
 
-    def test_complex_expression_returns_raw(self):
-        result = convert_search_expression("python OR ruby")
-        assert result == "python OR ruby"
+    def test_quotes_literal_terms_colliding_with_keywords(self):
+        assert convert_search_expression("golang not") == 'golang AND "not"'
+        assert convert_search_expression("filter") == '"filter"'
+        assert convert_search_expression("sort") == '"sort"'
+        assert convert_search_expression("NOT") == '"NOT"'
+        assert convert_search_expression("golang NOT old") == 'golang AND "NOT" AND old'
+        assert convert_search_expression("+not") == '"not"'
+
+    def test_emoji_expression(self):
+        result = convert_search_expression("\U0001f600 tutorial -\U0001f389")
+        assert "\U0001f600" in result
+        assert "tutorial" in result
+        assert "NOT \U0001f389" in result
 
 
 class TestSimplifySearchExpression:
-    """Tests for simplify_search_expression function."""
+    """Tests for simplify_search_expression."""
 
     def test_basic_simplification(self):
-        result = simplify_search_expression("+golang tutorial -deprecated")
+        result = simplify_search_expression("golang tutorial -old")
         assert result.main_term == "golang"
         assert result.and_terms == ["tutorial"]
-        assert result.not_terms == ["deprecated"]
-
-    def test_optional_terms_only(self):
-        result = simplify_search_expression("python ruby")
-        assert result.main_term == "python"
-        assert result.and_terms == ["ruby"]
-        assert result.not_terms == []
+        assert result.not_terms == ["old"]
 
     def test_no_positive_terms_raises_error(self):
         with pytest.raises(ValueError, match="at least one positive term"):
-            simplify_search_expression("-deprecated -old")
+            simplify_search_expression("-old")
 
-    def test_or_only_expression_preserved(self):
-        """OR-only expressions are surfaced as a parenthesized main_term."""
-        result = simplify_search_expression("python OR ruby")
-        assert result.main_term == "(python OR ruby)"
-        assert result.and_terms == []
-        assert result.not_terms == []
+    def test_or_only_expression_is_rejected(self):
+        # The legacy structured API has no way to represent boolean OR:
+        # every consumer of main_term re-applies wire quoting to it, which
+        # would wrap "python OR ruby" as one opaque literal-phrase term
+        # instead of parsing it as boolean OR.
+        with pytest.raises(ValueError):
+            simplify_search_expression("python OR ruby")
 
-    def test_already_parenthesized_or_expression_not_double_wrapped(self):
-        result = simplify_search_expression("(python OR ruby)")
-        assert result.main_term == "(python OR ruby)"
-        # It must not become "((python OR ruby))"
-        assert not result.main_term.startswith("((")
+    def test_parenthesized_or_expression_is_rejected(self):
+        with pytest.raises(ValueError):
+            simplify_search_expression("(python OR ruby)")
 
-    def test_or_only_with_excluded_terms(self):
-        """Excluded terms still flow through OR-only simplification."""
-        result = simplify_search_expression("python OR ruby -deprecated")
-        assert result.main_term.startswith("(")
-        assert "python" in result.main_term
-        assert "ruby" in result.main_term
-        # Excluded terms are still surfaced separately
-        # (note: '-deprecated' inside the OR-only parse keeps it in excluded_terms)
-        assert "deprecated" in result.not_terms
-
-    def test_required_with_or_subexpression_keeps_required(self):
-        """Mixed +required and OR sub-expression: keep the required terms.
-
-        The OR sub-expression is currently not surfaced through simplify
-        (matches the C++ client behavior), but the call must not fail or
-        flatten OR into AND.
-        """
-        result = simplify_search_expression("+golang (tutorial OR guide)")
-        assert result.main_term == "golang"
-        assert result.and_terms == []
-        assert result.not_terms == []
-
-
-class TestToQueryStringWrapsOr:
-    """Lock-in test for ToQueryString wrapping OR sub-expressions in parens."""
-
-    def test_or_subexpression_wrapped_in_parens(self):
-        result = convert_search_expression("python OR ruby")
-        # The conversion preserves the raw expression for complex cases
-        assert "python" in result
-        assert "ruby" in result
-        assert "OR" in result
+    def test_required_with_or_subexpression_is_rejected(self):
+        with pytest.raises(ValueError):
+            simplify_search_expression("+golang (tutorial OR guide)")

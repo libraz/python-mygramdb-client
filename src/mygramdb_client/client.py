@@ -51,6 +51,39 @@ from .types import (
     SearchResult,
     ServerInfo,
 )
+from .wire_quoting import parse_wire_token, quote_wire_token
+
+
+def _command_verb(command: str) -> str:
+    """First whitespace-delimited token of ``command``, upper-cased."""
+    verb_end = command.find(" ")
+    verb = command if verb_end < 0 else command[:verb_end]
+    return verb.upper()
+
+
+def _is_search_or_count_command(command: str) -> bool:
+    """
+    Check whether ``command`` is SEARCH or COUNT.
+
+    Only these two produce an "OK RESULTS"/"OK COUNT" header that a
+    trailing HIGHLIGHT/DEBUG body can follow; every other command's
+    single-line reply genuinely ends at its first line regardless of the
+    connection's debug flag.
+    """
+    return _command_verb(command) in ("SEARCH", "COUNT")
+
+
+def _command_requests_highlight(command: str) -> bool:
+    """
+    Check whether ``command``'s HIGHLIGHT clause, if any, is real.
+
+    HIGHLIGHT is a case-insensitive clause keyword recognized as a bare,
+    whitespace-delimited token. Every query/AND/NOT/FILTER value equal to it
+    is quoted by :func:`~.wire_quoting.quote_wire_token` before reaching the
+    wire, so an unquoted HIGHLIGHT token in the command text can only be the
+    real clause.
+    """
+    return any(token.upper() == "HIGHLIGHT" for token in command.split())
 
 
 class MygramClient:
@@ -78,6 +111,12 @@ class MygramClient:
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
         self._connected = False
+        # Mirrors the server's per-connection DEBUG ON/OFF flag (spec/
+        # tcp-commands.md §10.7) so a SEARCH/COUNT response is known to carry
+        # a trailing debug block before any bytes of it have arrived. Reset
+        # on every fresh connection since the flag does not survive a new
+        # server-side connection.
+        self._debug_mode = False
         # Serializes concurrent send_command calls: a single TCP connection
         # carries one request/response stream, and interleaved writes/reads
         # would corrupt the protocol. Lazily created on first acquisition so
@@ -139,6 +178,7 @@ class MygramClient:
                 if self.config.tcp_keepalive:
                     self._apply_keepalive()
             self._connected = True
+            self._debug_mode = False
         except asyncio.TimeoutError:
             raise TimeoutError("Connection timeout")
         except OSError as e:
@@ -590,6 +630,11 @@ class MygramClient:
         """
         Get a document by its primary key.
 
+        Primary keys are data, not identifiers: ``primary_key`` is quoted
+        through the shared wire-quoting decision rather than rejected for
+        whitespace, so a key returned by :meth:`search` can always be sent
+        back here unchanged (MygramDB v1.10.2+).
+
         Args:
             table: Table name to retrieve document from.
             primary_key: Primary key value of the document.
@@ -601,11 +646,15 @@ class MygramClient:
             ConnectionError: If not connected to server.
             TimeoutError: If command times out.
             ProtocolError: If server returns an error.
+            InputValidationError: If primary_key is empty or contains
+                control characters.
         """
         validate_identifier(table, "table name")
-        validate_identifier(primary_key, "primary key")
+        if primary_key == "":
+            raise InputValidationError("Input for primary key is empty")
+        ensure_safe_command_value(primary_key, "primary key")
 
-        response = await self.send_command(f"GET {table} {primary_key}")
+        response = await self.send_command(f"GET {table} {quote_wire_token(primary_key)}")
         return self._parse_document_response(response)
 
     async def info(self) -> ServerInfo:
@@ -698,6 +747,7 @@ class MygramClient:
         response = await self.send_command("DEBUG ON")
         if not response.startswith("OK"):
             raise ProtocolError(f"Failed to enable debug: {response}")
+        self._debug_mode = True
 
     async def disable_debug(self) -> None:
         """
@@ -711,6 +761,7 @@ class MygramClient:
         response = await self.send_command("DEBUG OFF")
         if not response.startswith("OK"):
             raise ProtocolError(f"Failed to disable debug: {response}")
+        self._debug_mode = False
 
     async def dump_save(self, filepath: str) -> str:
         """
@@ -1073,7 +1124,7 @@ class MygramClient:
             # through to the OSError branch and be mis-reported as a
             # ConnectionError.
             try:
-                response = await self._read_response()
+                response = await self._read_response(command)
             except TimeoutError:
                 self._connected = False
                 raise
@@ -1118,7 +1169,7 @@ class MygramClient:
         lock is already held and must not recurse into reconnect logic.
         """
         await self._write_command(command)
-        return self._decode_response(await self._read_response())
+        return self._decode_response(await self._read_response(command))
 
     async def _reconnect(self) -> None:
         """
@@ -1131,7 +1182,7 @@ class MygramClient:
         await self._open_connection()
         await self._authenticate_if_configured()
 
-    async def _read_response(self) -> str:
+    async def _read_response(self, command: str) -> str:
         """Read complete response from server.
 
         Bytes are accumulated in place and decoded once the framing is
@@ -1144,12 +1195,23 @@ class MygramClient:
         restarted by each partial read, so a server that trickles bytes cannot
         hold a command open indefinitely. ``max_response_bytes`` caps a single
         frame.
+
+        ``command`` is the frame that was sent: a SEARCH/COUNT header line
+        reads identically whether or not a HIGHLIGHT/DEBUG body follows it,
+        so completion has to be decided from the command rather than from
+        where a chunk happens to end (see :meth:`_is_response_complete`).
         """
         # Only reached from send_command, which guarantees a live connection.
         assert self._reader is not None
         buffer = bytearray()
         deadline = time.monotonic() + self._command_timeout()
         max_response_bytes = self.config.max_response_bytes
+
+        is_search_or_count = _is_search_or_count_command(command)
+        expect_multiline_tail = is_search_or_count and (
+            self._debug_mode or _command_requests_highlight(command)
+        )
+        expect_debug_marker = is_search_or_count and self._debug_mode
 
         while True:
             remaining = deadline - time.monotonic()
@@ -1177,7 +1239,7 @@ class MygramClient:
 
             # Check if response is complete (lenient probe on partial bytes).
             probe = buffer.decode("utf-8", errors="ignore")
-            if self._is_response_complete(probe):
+            if self._is_response_complete(probe, expect_multiline_tail, expect_debug_marker):
                 return buffer.decode("utf-8")
 
     # Multi-line response prefixes that terminate with "END\r\n" (or "END\n").
@@ -1193,8 +1255,23 @@ class MygramClient:
         ("OK DUMP_INFO", False),
     )
 
-    def _is_response_complete(self, buffer: str) -> bool:
-        """Check if buffer contains a complete response."""
+    def _is_response_complete(
+        self,
+        buffer: str,
+        expect_multiline_tail: bool = False,
+        expect_debug_marker: bool = False,
+    ) -> bool:
+        """
+        Check if buffer contains a complete response.
+
+        ``expect_multiline_tail``/``expect_debug_marker`` are set by
+        :meth:`_read_response` from the command that was sent, for the one
+        case the buffer's bytes alone cannot decide: a SEARCH/COUNT header
+        line reads identically whether or not a HIGHLIGHT/DEBUG body follows
+        it, so a chunk boundary landing right after that header, or right
+        after the debug block's own opening blank line (before ``# DEBUG``
+        itself has arrived), must not be mistaken for the frame's true end.
+        """
         ends_with_blank = (
             buffer.endswith("\n\n")
             or buffer.endswith("\r\n\r\n")
@@ -1221,10 +1298,27 @@ class MygramClient:
                     if first_line == prefix or first_line.startswith(prefix + " "):
                         return ends_with_end_marker
 
+        # SHOW VARIABLES (non-empty): a bare ASCII table with no OK/+OK/ERROR
+        # status prefix (spec/tcp-commands.md §13, item 1). Every border and
+        # row line ends in "\r\n" just like a lone first line would, so this
+        # must be told apart from a genuine single-line response before the
+        # generic fallback below.
+        if buffer.startswith("+-"):
+            return ends_with_blank
+
         # FACET response (MygramDB v1.6+) - multi-line, terminated by blank line
         if (buffer.startswith("OK FACET ")
                 or buffer.startswith("OK FACET\r")
                 or buffer.startswith("OK FACET\n")):
+            return ends_with_blank
+
+        if expect_multiline_tail:
+            # The DEBUG block's own opening ("\r\n\r\n# DEBUG\r\n") is itself
+            # a blank-line pattern; require the literal marker to have fully
+            # arrived before trusting "ends with a blank line" as the real
+            # terminator.
+            if expect_debug_marker and "# DEBUG\r\n" not in buffer:
+                return False
             return ends_with_blank
 
         # HIGHLIGHT response (MygramDB v1.6+) - SEARCH result with tab-prefixed
@@ -1293,7 +1387,9 @@ class MygramClient:
                <id2>\\t<snippet2>
                ...
 
-        Either format may be followed by a ``# DEBUG`` block.
+        Either format may be followed by a ``# DEBUG`` block. Primary keys
+        are reversibly-escaped wire tokens (:func:`~.wire_quoting.parse_wire_token`),
+        so a key containing whitespace decodes intact instead of splitting.
         """
         lines = response.split("\n")
         first_line = lines[0]
@@ -1301,8 +1397,18 @@ class MygramClient:
         if not first_line.startswith("OK RESULTS "):
             raise ProtocolError(f"Invalid SEARCH response: {first_line}")
 
-        header_parts = first_line.split(" ")
-        total_count = int(header_parts[2])
+        pos = 0
+        header_tokens = []
+        for _ in range(3):  # "OK", "RESULTS", "<total_count>"
+            parsed = parse_wire_token(first_line, pos)
+            if parsed is None:
+                raise ProtocolError(f"Malformed SEARCH response header: {first_line}")
+            token, pos = parsed
+            header_tokens.append(token)
+        try:
+            total_count = int(header_tokens[2])
+        except ValueError:
+            raise ProtocolError(f"Invalid SEARCH total count: {header_tokens[2]}")
 
         # Collect payload lines that precede an optional # DEBUG block.
         payload_lines: List[str] = []
@@ -1322,17 +1428,22 @@ class MygramClient:
             results = []
             for line in payload_lines:
                 tab = line.find("\t")
-                if tab < 0:
-                    results.append(SearchResult(primary_key=line, snippet=""))
-                else:
-                    results.append(SearchResult(
-                        primary_key=line[:tab],
-                        snippet=line[tab + 1:],
-                    ))
+                key_field = line if tab < 0 else line[:tab]
+                parsed = parse_wire_token(key_field, 0)
+                if parsed is None or parsed[1] != len(key_field):
+                    raise ProtocolError(f"Malformed SEARCH primary key: {line}")
+                snippet = "" if tab < 0 else line[tab + 1:]
+                results.append(SearchResult(primary_key=parsed[0], snippet=snippet))
         else:
-            # Classic mode: PKs follow the count on the first line
-            ids = header_parts[3:]
-            results = [SearchResult(primary_key=id_) for id_ in ids]
+            # Classic mode: reversibly-escaped PKs follow the count on the
+            # header line.
+            results = []
+            while True:
+                parsed = parse_wire_token(first_line, pos)
+                if parsed is None:
+                    break
+                token, pos = parsed
+                results.append(SearchResult(primary_key=token))
 
         # Parse debug info if present
         debug = None
@@ -1436,18 +1547,50 @@ class MygramClient:
 
     @staticmethod
     def _parse_document_response(response: str) -> Document:
-        """Parse GET response."""
+        """
+        Parse GET response (``OK DOC <primary_key> [<key>=<value> ...]``).
+
+        The primary key and each field's string value are reversibly-escaped
+        wire tokens (:func:`~.wire_quoting.parse_wire_token`), so one
+        containing whitespace decodes intact instead of splitting on the
+        space that separates fields (MygramDB v1.10.2+). A non-string field
+        (number, ``true``/``false``, ``NULL``) is never quoted and is read
+        the same way, as a bare token.
+        """
         if not response.startswith("OK DOC "):
             raise ProtocolError(f"Invalid GET response: {response}")
 
-        parts = response[7:].split(" ")
-        primary_key = parts[0]
-        fields: Dict[str, str] = {}
+        pos = 0
+        header_tokens = []
+        for _ in range(3):  # "OK", "DOC", "<primary_key>"
+            parsed = parse_wire_token(response, pos)
+            if parsed is None:
+                raise ProtocolError(f"Malformed GET response: {response}")
+            token, pos = parsed
+            header_tokens.append(token)
+        primary_key = header_tokens[2]
 
-        for part in parts[1:]:
-            if "=" in part:
-                key, value = part.split("=", 1)
-                fields[key] = value
+        fields: Dict[str, str] = {}
+        length = len(response)
+        while pos < length:
+            while pos < length and response[pos] in " \t":
+                pos += 1
+            if pos >= length:
+                break
+            key_start = pos
+            while pos < length and response[pos] != "=" and response[pos] not in " \t":
+                pos += 1
+            if pos >= length or response[pos] != "=":
+                # No '=' before the next whitespace: not a key=value token.
+                continue
+            key = response[key_start:pos]
+            pos += 1  # skip '='
+            parsed = parse_wire_token(response, pos)
+            if parsed is None:
+                fields[key] = ""
+                break
+            value, pos = parsed
+            fields[key] = value
 
         return Document(primary_key=primary_key, fields=fields)
 

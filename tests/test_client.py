@@ -172,6 +172,32 @@ class TestHighlightSearchResponseParsing:
         assert result.debug.filter_time_ms == 0.5
 
 
+class TestQuotedPrimaryKeyParsing:
+    """A primary key containing a space is quoted on the wire (MygramDB v1.10.2)."""
+
+    def test_classic_mode_quoted_primary_key_with_space(self):
+        response = 'OK RESULTS 2 "New York" id2'
+        result = MygramClient._parse_search_response(response)
+
+        assert result.total_count == 2
+        assert result.results[0].primary_key == "New York"
+        assert result.results[1].primary_key == "id2"
+
+    def test_highlight_mode_quoted_primary_key_with_space(self):
+        response = 'OK RESULTS 1\n"New York"\tsnippet text'
+        result = MygramClient._parse_search_response(response)
+
+        assert result.total_count == 1
+        assert result.results[0].primary_key == "New York"
+        assert result.results[0].snippet == "snippet text"
+
+    def test_classic_mode_quoted_primary_key_with_escaped_quote(self):
+        response = r'OK RESULTS 1 "say \"hi\""'
+        result = MygramClient._parse_search_response(response)
+
+        assert result.results[0].primary_key == 'say "hi"'
+
+
 class TestCountResponseParsing:
     """Tests for count response parsing."""
 
@@ -239,6 +265,38 @@ class TestDocumentResponseParsing:
     def test_parse_invalid_document_response_raises_error(self):
         with pytest.raises(ProtocolError, match="Invalid GET response"):
             MygramClient._parse_document_response("INVALID")
+
+    def test_quoted_primary_key_with_space(self):
+        response = 'OK DOC "New York" title=Hello'
+        result = MygramClient._parse_document_response(response)
+
+        assert result.primary_key == "New York"
+        assert result.fields["title"] == "Hello"
+
+    def test_quoted_field_value_with_space(self):
+        response = 'OK DOC 12345 title="Hello World" author=John'
+        result = MygramClient._parse_document_response(response)
+
+        assert result.primary_key == "12345"
+        assert result.fields["title"] == "Hello World"
+        assert result.fields["author"] == "John"
+
+    def test_quoted_primary_key_and_value_with_escapes(self):
+        response = r'OK DOC "say \"hi\"" note="a\tb"'
+        result = MygramClient._parse_document_response(response)
+
+        assert result.primary_key == 'say "hi"'
+        assert result.fields["note"] == "a\tb"
+
+    def test_non_string_field_values_are_bare_tokens(self):
+        # Numbers, booleans and NULL are never quoted by the server.
+        response = "OK DOC 12345 views=42 active=true score=1.500000 note=NULL"
+        result = MygramClient._parse_document_response(response)
+
+        assert result.fields["views"] == "42"
+        assert result.fields["active"] == "true"
+        assert result.fields["score"] == "1.500000"
+        assert result.fields["note"] == "NULL"
 
 
 class TestInfoResponseParsing:

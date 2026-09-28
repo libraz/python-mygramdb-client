@@ -319,9 +319,12 @@ class TestSearchCommandGeneration:
     def test_preserve_quotes_for_phrase_search(self):
         """Should preserve quotes for phrase search."""
         from mygramdb_client import simplify_search_expression
+        from mygramdb_client.command_utils import escape_query_string
 
+        # main_term is plain phrase text (not pre-quoted); the caller applies
+        # the shared wire-quoting decision, as Search() itself does.
         expr = simplify_search_expression('"hello world"')
-        parts = ["SEARCH", "tbl", expr.main_term]
+        parts = ["SEARCH", "tbl", escape_query_string(expr.main_term)]
 
         command = " ".join(parts)
         assert command == 'SEARCH tbl "hello world"'
@@ -329,9 +332,10 @@ class TestSearchCommandGeneration:
     def test_handle_phrase_with_additional_terms(self):
         """Should handle phrase with additional terms."""
         from mygramdb_client import simplify_search_expression
+        from mygramdb_client.command_utils import escape_query_string
 
         expr = simplify_search_expression('"hello world" test')
-        parts = ["SEARCH", "tbl", expr.main_term]
+        parts = ["SEARCH", "tbl", escape_query_string(expr.main_term)]
         for term in expr.and_terms:
             parts.extend(["AND", term])
 

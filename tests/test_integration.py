@@ -42,7 +42,10 @@ class TestSearchExpressionParsing:
         def test_parse_quoted_phrases(self):
             expr = simplify_search_expression('"machine learning" tutorial')
 
-            assert expr.main_term == '"machine learning"'
+            # Stored as plain phrase text, not pre-quoted: consumers of
+            # main_term (e.g. Search()) re-apply wire quoting exactly once,
+            # at their own destination.
+            assert expr.main_term == "machine learning"
             assert expr.and_terms == ["tutorial"]
 
         def test_handle_fullwidth_space_as_separator(self):
@@ -78,8 +81,10 @@ class TestSearchExpressionParsing:
         def test_parse_simple_terms(self):
             result = parse_search_expression("hello world")
 
-            assert result.required_terms == []
-            assert result.optional_terms == ["hello", "world"]
+            # Unprefixed terms are required (implicit AND); optional_terms is
+            # unused, kept only for source compatibility.
+            assert result.required_terms == ["hello", "world"]
+            assert result.optional_terms == []
             assert result.excluded_terms == []
 
         def test_parse_required_terms_with_plus(self):
@@ -91,26 +96,27 @@ class TestSearchExpressionParsing:
         def test_parse_excluded_terms_with_minus(self):
             result = parse_search_expression("search -excluded")
 
-            assert "search" in result.optional_terms
+            assert "search" in result.required_terms
             assert result.excluded_terms == ["excluded"]
 
         def test_parse_quoted_phrases(self):
             result = parse_search_expression('"exact phrase" other')
 
-            assert '"exact phrase"' in result.optional_terms
-            assert "other" in result.optional_terms
+            # Stored as plain phrase text, not pre-quoted.
+            assert "exact phrase" in result.required_terms
+            assert "other" in result.required_terms
 
         def test_handle_or_operator(self):
             result = parse_search_expression("cat OR dog")
 
-            assert "cat" in result.optional_terms
-            assert "dog" in result.optional_terms
+            assert "cat" in result.raw_expression
+            assert "dog" in result.raw_expression
 
         def test_handle_mixed_operators(self):
             result = parse_search_expression('+golang "web framework" -deprecated')
 
             assert "golang" in result.required_terms
-            assert '"web framework"' in result.optional_terms
+            assert "web framework" in result.required_terms
             assert "deprecated" in result.excluded_terms
 
 

@@ -12,8 +12,8 @@ from typing import Optional
 class FakeMygramServer:
     """A minimal MygramDB-protocol server bound to an ephemeral local port."""
 
-    def __init__(self, response_delay: float = 0.0):
-        self.host = "127.0.0.1"
+    def __init__(self, response_delay: float = 0.0, host: str = "127.0.0.1"):
+        self.host = host
         self.port: Optional[int] = None
         self._server: Optional[asyncio.AbstractServer] = None
         self.response_delay = response_delay
@@ -127,6 +127,11 @@ class FakeMygramServer:
         if verb == "SEARCH":
             if self.search_response is not None:
                 return self.search_response
+            if any(token.upper() == "HIGHLIGHT" for token in command.split()):
+                # HIGHLIGHT always yields the tab-row format, terminated by a
+                # blank line, regardless of result count (matches the real
+                # server's FormatSearchResponseWithHighlights framing).
+                return b"OK RESULTS 1\r\npk1\t\r\n\r\n"
             return b"OK RESULTS 1 pk1\r\n"
         if verb == "COUNT":
             return b"OK COUNT 1\r\n"

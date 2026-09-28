@@ -83,6 +83,63 @@ class TestTermQuoting:
         assert 'NOT "old stuff"' in cmd
         assert 'FILTER status = "in review"' in cmd
 
+    def test_quotes_unicode_whitespace_term(self):
+        # Full-width space (U+3000): unquoted, the server's tokenizer would
+        # split this into two terms instead of one literal query (v1.10.2).
+        commands, _ = run_capturing(
+            lambda c: c.search("articles", "東京　タワー")
+        )
+        assert 'SEARCH articles "東京　タワー"' in commands[0]
+
+    def test_quotes_reserved_keyword_terms_and_filter_value(self):
+        # A query, AND/NOT term or FILTER value spelling a clause keyword
+        # must be quoted, or the server reads it as the operator instead of
+        # text (v1.10.2).
+        commands, _ = run_capturing(
+            lambda c: c.search(
+                "articles", "AND",
+                SearchOptions(
+                    and_terms=["OR"],
+                    not_terms=["LIMIT"],
+                    filters={"status": "SORT"},
+                ),
+            )
+        )
+        cmd = commands[0]
+        assert 'SEARCH articles "AND"' in cmd
+        assert 'AND "OR"' in cmd
+        assert 'NOT "LIMIT"' in cmd
+        assert 'FILTER status = "SORT"' in cmd
+
+
+class TestGetCommand:
+    """GET quotes its primary key as data, not as an identifier (v1.10.2)."""
+
+    def test_bare_primary_key_unquoted(self):
+        commands, _ = run_capturing(
+            lambda c: c.get("articles", "pk1"), response="OK DOC pk1"
+        )
+        assert commands[0] == "GET articles pk1"
+
+    def test_primary_key_with_space_is_quoted(self):
+        # A primary key returned by search() (e.g. a VARCHAR key containing
+        # a space) must be sendable back to get() unchanged.
+        commands, _ = run_capturing(
+            lambda c: c.get("articles", "New York"),
+            response='OK DOC "New York"',
+        )
+        assert commands[0] == 'GET articles "New York"'
+
+    def test_primary_key_equal_to_reserved_keyword_is_quoted(self):
+        commands, _ = run_capturing(
+            lambda c: c.get("articles", "AND"), response='OK DOC "AND"'
+        )
+        assert commands[0] == 'GET articles "AND"'
+
+    def test_empty_primary_key_rejected(self):
+        with pytest.raises(InputValidationError, match="is empty"):
+            asyncio.run(unreachable_client().get("articles", ""))
+
 
 # ---------------------------------------------------------------------------
 # FILTER clauses
