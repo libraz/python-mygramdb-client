@@ -25,7 +25,9 @@ docker compose -f tests/docker/docker-compose.yml down -v
 | Variable | Default | Purpose |
 |---|---|---|
 | `MYGRAMDB_VERSION` | `1.10.2` | Server image tag (`ghcr.io/libraz/mygram-db:<tag>`; e.g. `1.8.0`, `latest`) |
-| `MYSQL_VERSION` | `8.4` | MySQL image tag |
+| `DB_FLAVOR` | `mysql` | `mysql` or `mariadb`; selects the compose file and seed database |
+| `MYSQL_VERSION` | `8.4` | MySQL image tag (used when `DB_FLAVOR=mysql`) |
+| `MARIADB_VERSION` | `11.8` | MariaDB image tag (used when `DB_FLAVOR=mariadb`) |
 | `MYGRAM_PORT` | `11016` | Host port mapped to the server's TCP API |
 | `MYGRAM_HTTP_PORT` | `18080` | Host port mapped to the server's HTTP/health API |
 | `MYGRAM_ADMIN_TOKEN` | `e2e_admin_token` | Administrative token given to the server and, when it supports `AUTH`, to the client |
@@ -34,8 +36,25 @@ docker compose -f tests/docker/docker-compose.yml down -v
 
 ```bash
 MYGRAMDB_VERSION=1.8.0 tests/docker/run-e2e.sh   # older server, same suite
+DB_FLAVOR=mariadb tests/docker/run-e2e.sh        # against MariaDB instead of MySQL
 KEEP_UP=1 tests/docker/run-e2e.sh                # inspect the running stack afterwards
 ```
+
+## Database version matrix
+
+```bash
+# Run the full suite once per target below, sequentially, tearing the stack
+# down between each. Non-zero exit if any target fails.
+tests/docker/run-matrix.sh
+
+# Only a subset
+tests/docker/run-matrix.sh --only mysql:8.4,mariadb:11.8
+```
+
+Targets (mirrors the server's own `e2e/run-matrix.sh`): `mysql:8.4`, `mysql:9.7`,
+`mariadb:10.11`, `mariadb:11.8`, `mariadb:12.3`. Every entry is a supported LTS;
+innovation releases are superseded by the next one a quarter later, so they are
+reached with `--only` rather than carried in the default list.
 
 ## Administrative authentication
 
@@ -90,7 +109,12 @@ The version-agnostic round-trip checks (`search_raw`, `set_variable` /
 ## Files
 
 - `docker-compose.yml` — MySQL + MygramDB services
+- `docker-compose.mariadb.yml` — MariaDB + MygramDB services (`DB_FLAVOR=mariadb`)
 - `mygramdb.yaml` — server config (replicates `testdb` from the `mysql` service)
+- `mygramdb-mariadb.yaml` — same config, pointed at the `mariadb` service
 - `mysql-init/01-schema.sql` — schema + replication grants
 - `mysql-init/02-seed.sql` — deterministic dataset
+- `mariadb-init/01-schema.sql` — same schema minus the MySQL-only FULLTEXT ngram index
+- `mariadb-init/02-seed.sql` — same deterministic dataset
 - `run-e2e.sh` — orchestrates up → test → down
+- `run-matrix.sh` — runs `run-e2e.sh` once per database version target
