@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-09-28
+
 ### Changed
 
 - Python 3.11 or later is required; Python 3.9 and 3.10 are no longer
@@ -43,6 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `ClientConfig.host` accepting an IPv6 literal or an IPv6-only hostname is
     confirmed working (`asyncio.open_connection` already resolves and
     connects both address families)
+
+### Testing
+
+- The docker e2e suite runs across the server's database matrix (MySQL 8.4
+  and 9.7, MariaDB 10.11, 11.8 and 12.3) through `tests/docker/run-matrix.sh`,
+  with `--only` to select targets
 
 ## [1.4.0] - 2026-08-10
 
@@ -321,7 +329,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Input validation and error handling
 - Full type hints with dataclasses
 
-[Unreleased]: https://github.com/libraz/python-mygramdb-client/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/libraz/python-mygramdb-client/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/libraz/python-mygramdb-client/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/libraz/python-mygramdb-client/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/libraz/python-mygramdb-client/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/libraz/python-mygramdb-client/compare/v1.2.0...v1.2.1
