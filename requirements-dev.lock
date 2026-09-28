@@ -10,18 +10,18 @@
 #   universal: false
 
 -e file:.
-ast-serialize==0.8.0
+ast-serialize==0.11.2
     # via mypy
-coverage==7.15.4
+coverage==7.16.2
     # via pytest-cov
-flake8==7.3.0
+flake8==7.4.1
 iniconfig==2.3.0
     # via pytest
 librt==0.15.0
     # via mypy
 mccabe==0.7.0
     # via flake8
-mypy==2.3.0
+mypy==2.3.1
 mypy-extensions==1.1.0
     # via mypy
 packaging==26.3
@@ -31,11 +31,11 @@ pathspec==1.1.1
 pluggy==1.6.0
     # via pytest
     # via pytest-cov
-pycodestyle==2.14.0
+pycodestyle==2.15.0
     # via flake8
-pyflakes==3.4.0
+pyflakes==4.0.0
     # via flake8
-pygments==2.20.0
+pygments==2.21.0
     # via pytest
 pytest==9.1.1
     # via pytest-asyncio
@@ -44,4 +44,3 @@ pytest-asyncio==1.4.0
 pytest-cov==7.1.0
 typing-extensions==4.16.0
     # via mypy
-    # via pytest-asyncio
