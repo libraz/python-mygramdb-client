@@ -204,6 +204,16 @@ class TestValidateIdentifier:
         with pytest.raises(InputValidationError, match="whitespace"):
             validate_identifier(" table", "table name")
 
+    @pytest.mark.parametrize(
+        "code", [0x0085, 0x00A0, 0x1680, 0x2003, 0x200A, 0x2028, 0x202F, 0x205F, 0x3000]
+    )
+    def test_unicode_whitespace_rejected(self, code):
+        with pytest.raises(InputValidationError, match="whitespace"):
+            validate_identifier(f"a{chr(code)}b", "table name")
+
+    def test_zero_width_space_is_not_whitespace(self):
+        validate_identifier("a\u200bb", "table name")
+
     def test_trailing_space_rejected(self):
         with pytest.raises(InputValidationError, match="whitespace"):
             validate_identifier("table ", "table name")
@@ -495,6 +505,11 @@ class TestValidateFacetColumn:
     def test_tab_rejected(self):
         with pytest.raises(InputValidationError, match="invalid character"):
             validate_facet_column("bad\tcol")
+
+    @pytest.mark.parametrize("ch", ["\u0085", "\u00a0", "\u2003", "\u3000"])
+    def test_unicode_whitespace_rejected(self, ch):
+        with pytest.raises(InputValidationError, match="invalid character"):
+            validate_facet_column(f"bad{ch}col")
 
     def test_control_char_rejected(self):
         with pytest.raises(InputValidationError, match="invalid character"):

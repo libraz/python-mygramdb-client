@@ -4,13 +4,10 @@ from typing import Dict, List, Optional
 
 from .errors import InputValidationError
 from .types import FilterCondition, FilterOp, HighlightOptions
-from .wire_quoting import quote_wire_token
+from .wire_quoting import is_wire_whitespace, quote_wire_token
 
 # Control characters: 0x00-0x1F and 0x7F
 CONTROL_CHAR_PATTERN = re.compile(r'[\x00-\x1f\x7f]')
-
-# Whitespace characters that would split an unquoted identifier into multiple tokens
-_IDENTIFIER_WHITESPACE = (" ", "\t", "\n", "\r", "\v", "\f")
 
 # Characters that would end an unquoted identifier's token or change the
 # tokenizer's quote/escape state, so they cannot appear in a bare identifier
@@ -31,8 +28,9 @@ def validate_identifier(value: str, field_name: str) -> None:
     """
     Validate an unquoted identifier (table, primary key, sort column, filter key).
 
-    Identifiers are sent on the wire without quoting; embedded whitespace would
-    split them into multiple tokens, and a quote or backslash would flip the
+    Identifiers are sent on the wire without quoting; embedded whitespace
+    (ASCII or Unicode, as the server's tokenizer splits on both) would split
+    them into multiple tokens, and a quote or backslash would flip the
     tokenizer's quote/escape state, corrupting the rest of the command.
 
     Args:
@@ -52,7 +50,7 @@ def validate_identifier(value: str, field_name: str) -> None:
                 f"Input for {field_name} contains control character "
                 f"0x{code:02X}, which is not allowed"
             )
-        if ch in _IDENTIFIER_WHITESPACE:
+        if is_wire_whitespace(ch):
             raise InputValidationError(
                 f"Input for {field_name} contains whitespace, "
                 "which is not allowed in identifiers"
@@ -335,7 +333,7 @@ def validate_table_name(table: str) -> None:
 
     ensure_safe_command_value(table, "table")
     for ch in table:
-        if ch in _IDENTIFIER_WHITESPACE:
+        if is_wire_whitespace(ch):
             raise InputValidationError(
                 "Table name contains whitespace, which is not allowed"
             )
@@ -430,7 +428,7 @@ def validate_facet_column(column: str) -> None:
         raise InputValidationError("facet column must not be empty")
     for ch in column:
         code = ord(ch)
-        if (0x00 <= code <= 0x1F) or code == 0x7F or ch == " " or ch == "\t":
+        if (0x00 <= code <= 0x1F) or code == 0x7F or is_wire_whitespace(ch):
             raise InputValidationError(
                 f"facet column contains invalid character: {ch!r}"
             )
@@ -454,7 +452,7 @@ def validate_primary_key(primary_key: str) -> None:
 
     ensure_safe_command_value(primary_key, "primaryKey")
     for ch in primary_key:
-        if ch in _IDENTIFIER_WHITESPACE:
+        if is_wire_whitespace(ch):
             raise InputValidationError(
                 "Primary key contains whitespace, which is not allowed"
             )

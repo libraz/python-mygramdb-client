@@ -37,10 +37,29 @@ class TestNeedsWireQuoting:
 
     @pytest.mark.parametrize(
         "code",
-        [0x00A0, 0x1680, 0x2000, 0x2001, 0x200B, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000],
+        [0x0085, 0x00A0, 0x1680, 0x2000, 0x2001, 0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000],
     )
     def test_unicode_whitespace_needs_quoting(self, code):
         assert needs_wire_quoting(f"a{chr(code)}b")
+
+    def test_zero_width_space_is_not_whitespace(self):
+        # U+200B is not Unicode White_Space: the server keeps it inside a token.
+        assert not needs_wire_quoting("a\u200bb")
+        assert quote_wire_token("a\u200bb") == "a\u200bb"
+
+    def test_nel_term_is_quoted_and_round_trips(self):
+        quoted = quote_wire_token("a\x85b")
+        assert quoted == '"a\x85b"'
+
+    @pytest.mark.parametrize("value", ["a\"b", "it's", "a\\b"])
+    def test_bare_token_with_quote_or_backslash_is_quoted(self, value):
+        assert needs_wire_quoting(value)
+        assert quote_wire_token(value).startswith('"')
+
+    def test_non_ascii_latin_letters_ending_in_a0_or_85_are_not_split(self):
+        # U+00E0 / U+00C5 share a trailing UTF-8 byte with NBSP / NEL.
+        assert not needs_wire_quoting("caf\u00e0")
+        assert not needs_wire_quoting("\u00c5ngstr\u00f6m")
 
     def test_control_char_needs_quoting(self):
         assert needs_wire_quoting("a\x01b")

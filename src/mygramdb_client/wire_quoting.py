@@ -27,14 +27,15 @@ RESERVED_KEYWORDS = frozenset({
 
 # ASCII whitespace the server's tokenizer splits on outside quotes -- the C
 # isspace() set (space, tab, LF, VT, FF, CR), not Python's broader str.isspace().
-_ASCII_WHITESPACE = frozenset(" \t\n\v\f\r")
+ASCII_WHITESPACE = frozenset(" \t\n\v\f\r")
 
 # Non-ASCII whitespace code points the server's tokenizer also splits on
-# outside quotes (spec/tcp-commands.md §2): U+00A0, U+1680, U+2000-U+200B,
-# U+2028, U+2029, U+202F, U+205F, U+3000.
+# outside quotes (spec/tcp-commands.md §2), i.e. Unicode White_Space: U+0085,
+# U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029, U+202F, U+205F, U+3000.
+# U+200B (zero width space) is not White_Space.
 _UNICODE_WHITESPACE = frozenset(
-    {chr(code) for code in (0x00A0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000)}
-    | {chr(code) for code in range(0x2000, 0x200C)}
+    {chr(code) for code in (0x0085, 0x00A0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000)}
+    | {chr(code) for code in range(0x2000, 0x200B)}
 )
 
 _QUOTE_TRIGGER_CHARS = frozenset({'"', "'", "\\", "(", ")"})
@@ -44,7 +45,7 @@ _ESCAPE_MAP = {"\\": "\\\\", '"': '\\"', "\r": "\\r", "\n": "\\n", "\t": "\\t"}
 
 def is_wire_whitespace(ch: str) -> bool:
     """Check whether ``ch`` is ASCII or Unicode whitespace per the server's tokenizer."""
-    return ch in _ASCII_WHITESPACE or ch in _UNICODE_WHITESPACE
+    return ch in ASCII_WHITESPACE or ch in _UNICODE_WHITESPACE
 
 
 def _is_control_char(ch: str) -> bool:
@@ -131,14 +132,14 @@ def parse_wire_token(text: str, pos: int) -> Optional[Tuple[str, int]]:
         quote, a truncated ``\\x`` escape, or nothing left to read.
     """
     length = len(text)
-    while pos < length and text[pos] in _ASCII_WHITESPACE:
+    while pos < length and text[pos] in ASCII_WHITESPACE:
         pos += 1
     if pos >= length:
         return None
 
     if text[pos] != '"':
         start = pos
-        while pos < length and text[pos] not in _ASCII_WHITESPACE:
+        while pos < length and text[pos] not in ASCII_WHITESPACE:
             pos += 1
         return text[start:pos], pos
 
