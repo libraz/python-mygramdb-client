@@ -298,6 +298,28 @@ class TestDocumentResponseParsing:
         assert result.fields["score"] == "1.500000"
         assert result.fields["note"] == "NULL"
 
+    @pytest.mark.parametrize(
+        "response",
+        [
+            'OK DOC 1 title="unterminated',
+            'OK DOC 1 title="bad\\x4"',
+            'OK DOC 1 a=1 title="trailing\\',
+        ],
+    )
+    def test_malformed_quoted_field_value_is_rejected(self, response):
+        with pytest.raises(ProtocolError, match="Malformed GET field value"):
+            MygramClient._parse_document_response(response)
+
+    def test_equals_before_whitespace_is_an_empty_bare_value(self):
+        result = MygramClient._parse_document_response("OK DOC 1 a= b=2")
+
+        assert result.fields == {"a": "", "b": "2"}
+
+    def test_empty_string_field_is_a_quoted_empty_token(self):
+        result = MygramClient._parse_document_response('OK DOC 1 a="" b=2')
+
+        assert result.fields == {"a": "", "b": "2"}
+
 
 class TestInfoResponseParsing:
     """Tests for info response parsing."""

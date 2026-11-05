@@ -136,7 +136,7 @@ class FakeMygramServer:
         if verb == "COUNT":
             return b"OK COUNT 1\r\n"
         if verb == "FACET":
-            return b"OK FACET 1 3\r\nalpha\t5\r\n\r\n"
+            return b"OK FACET 1 3\r\nalpha\t5\r\n\r\n\r\n"
         if verb == "GET":
             return b"OK DOC pk1 field=value\r\n"
         if verb == "INFO":

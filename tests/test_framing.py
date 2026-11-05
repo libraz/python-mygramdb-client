@@ -1,8 +1,8 @@
 """Response framing: where a response ends, and the bounds on reading it.
 
-Three related concerns, all about the read loop rather than about any one
-command: deciding a buffer holds a complete response, reassembling one that
-arrives in pieces, and refusing one that never ends.
+Two concerns about the read loop rather than about any one command:
+reassembling a response that arrives in pieces, and refusing one that never
+ends. Where a frame ends is covered in ``test_response_frame.py``.
 """
 import asyncio
 
@@ -12,66 +12,6 @@ from mygramdb_client import ClientConfig, MygramClient
 from mygramdb_client.errors import ProtocolError, TimeoutError
 
 from .fake_server import FakeMygramServer
-
-
-class TestMultiLineCompletionDetection:
-    """Tab-separated FACET and highlighted SEARCH bodies end on a blank line."""
-
-    def test_facet_response_incomplete(self):
-        client = MygramClient()
-        assert not client._is_response_complete("OK FACET 2\nvalue1\t5")
-
-    def test_facet_response_complete_lf(self):
-        client = MygramClient()
-        buffer = "OK FACET 2\nvalue1\t5\nvalue2\t3\n\n"
-        assert client._is_response_complete(buffer)
-
-    def test_facet_response_complete_crlf(self):
-        client = MygramClient()
-        buffer = "OK FACET 2\r\nvalue1\t5\r\nvalue2\t3\r\n\r\n"
-        assert client._is_response_complete(buffer)
-
-    def test_facet_empty_complete(self):
-        client = MygramClient()
-        assert client._is_response_complete("OK FACET 0\n\n")
-
-    def test_highlight_response_incomplete(self):
-        client = MygramClient()
-        assert not client._is_response_complete("OK RESULTS 2\nid1\tsnippet1")
-
-    def test_highlight_response_complete(self):
-        client = MygramClient()
-        buffer = "OK RESULTS 2\nid1\tsnippet1\nid2\tsnippet2\n\n"
-        assert client._is_response_complete(buffer)
-
-    def test_classic_search_response_still_complete(self):
-        """Regression: single-line SEARCH response should still terminate on \\n."""
-        client = MygramClient()
-        assert client._is_response_complete("OK RESULTS 2 id1 id2\n")
-
-
-class TestSyncStatusFraming:
-    """_is_response_complete treats OK SYNC_STATUS as END-terminated."""
-
-    def test_incomplete_without_end_marker(self):
-        client = MygramClient()
-        assert not client._is_response_complete("OK SYNC_STATUS\r\n")
-        assert not client._is_response_complete(
-            "OK SYNC_STATUS\r\nstatus=IDLE\r\n"
-        )
-
-    def test_complete_with_end_marker(self):
-        client = MygramClient()
-        assert client._is_response_complete(
-            "OK SYNC_STATUS\r\nstatus=IDLE\r\nEND\r\n"
-        )
-
-    def test_complete_with_trailing_blank_line_after_end(self):
-        # The server appends a trailing blank line after END for SYNC_STATUS.
-        client = MygramClient()
-        assert client._is_response_complete(
-            'OK SYNC_STATUS\r\nstatus=IDLE message="x"\r\nEND\r\n\r\n'
-        )
 
 
 class TestChunkBoundaryReassembly:
@@ -165,6 +105,7 @@ class TestDebugAndHighlightChunkedDelivery:
                             b"ngrams: 2\r\n"
                             b"final: 1\r\n"
                             b"cache: miss\r\n"
+                            b"\r\n"
                             b"\r\n"
                         )
                         await writer.drain()

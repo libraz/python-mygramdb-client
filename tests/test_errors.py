@@ -85,6 +85,19 @@ class TestErrorFrameDecoding:
         assert error.error_code is None
         assert error.message == "4007: Table not found"
 
+    @pytest.mark.parametrize(
+        "frame,expected",
+        [
+            ("ERROR 1008 Unknown variable: x", ErrorCode.CONFIG_UNKNOWN_VARIABLE),
+            ("ERROR 1009 Variable is not mutable", ErrorCode.CONFIG_VARIABLE_NOT_MUTABLE),
+        ],
+    )
+    def test_set_rejections_carry_their_registry_codes(self, frame, expected):
+        error = parse_error_frame(frame)
+
+        assert error.error_code == expected
+        assert error.error_code in (1008, 1009)
+
     def test_zero_is_not_a_code(self):
         error = parse_error_frame("ERROR 0 something")
 

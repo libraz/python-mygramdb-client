@@ -51,39 +51,8 @@ from .types import (
     SearchResult,
     ServerInfo,
 )
-from .wire_quoting import parse_wire_token, quote_wire_token
-
-
-def _command_verb(command: str) -> str:
-    """First whitespace-delimited token of ``command``, upper-cased."""
-    verb_end = command.find(" ")
-    verb = command if verb_end < 0 else command[:verb_end]
-    return verb.upper()
-
-
-def _is_search_or_count_command(command: str) -> bool:
-    """
-    Check whether ``command`` is SEARCH or COUNT.
-
-    Only these two produce an "OK RESULTS"/"OK COUNT" header that a
-    trailing HIGHLIGHT/DEBUG body can follow; every other command's
-    single-line reply genuinely ends at its first line regardless of the
-    connection's debug flag.
-    """
-    return _command_verb(command) in ("SEARCH", "COUNT")
-
-
-def _command_requests_highlight(command: str) -> bool:
-    """
-    Check whether ``command``'s HIGHLIGHT clause, if any, is real.
-
-    HIGHLIGHT is a case-insensitive clause keyword recognized as a bare,
-    whitespace-delimited token. Every query/AND/NOT/FILTER value equal to it
-    is quoted by :func:`~.wire_quoting.quote_wire_token` before reaching the
-    wire, so an unquoted HIGHLIGHT token in the command text can only be the
-    real clause.
-    """
-    return any(token.upper() == "HIGHLIGHT" for token in command.split())
+from .framing import OK_DEBUG_OFF, OK_DEBUG_ON, begin_response_frame, is_response_complete
+from .wire_quoting import ASCII_WHITESPACE, parse_wire_token, quote_wire_token
 
 
 class MygramClient:
@@ -113,9 +82,9 @@ class MygramClient:
         self._connected = False
         # Mirrors the server's per-connection DEBUG ON/OFF flag (spec/
         # tcp-commands.md §10.7) so a SEARCH/COUNT response is known to carry
-        # a trailing debug block before any bytes of it have arrived. Reset
-        # on every fresh connection since the flag does not survive a new
-        # server-side connection.
+        # a trailing debug block before any bytes of it have arrived. Set from
+        # the DEBUG reply inside _read_response and cleared whenever the
+        # connection goes away, since the flag dies with it.
         self._debug_mode = False
         # Serializes concurrent send_command calls: a single TCP connection
         # carries one request/response stream, and interleaved writes/reads
@@ -228,6 +197,7 @@ class MygramClient:
         self._reader = None
         self._writer = None
         self._connected = False
+        self._debug_mode = False
 
     async def authenticate(self, token: str) -> None:
         """
@@ -290,6 +260,7 @@ class MygramClient:
         self._reader = None
         self._writer = None
         self._connected = False
+        self._debug_mode = False
 
     def is_connected(self) -> bool:
         """Check if connected to server."""
@@ -747,7 +718,6 @@ class MygramClient:
         response = await self.send_command("DEBUG ON")
         if not response.startswith("OK"):
             raise ProtocolError(f"Failed to enable debug: {response}")
-        self._debug_mode = True
 
     async def disable_debug(self) -> None:
         """
@@ -761,7 +731,6 @@ class MygramClient:
         response = await self.send_command("DEBUG OFF")
         if not response.startswith("OK"):
             raise ProtocolError(f"Failed to disable debug: {response}")
-        self._debug_mode = False
 
     async def dump_save(self, filepath: str) -> str:
         """
@@ -1185,11 +1154,9 @@ class MygramClient:
     async def _read_response(self, command: str) -> str:
         """Read complete response from server.
 
-        Bytes are accumulated in place and decoded once the framing is
-        complete. The completeness probe decodes leniently (``errors="ignore"``)
-        so a multibyte character split across two reads cannot raise mid-stream;
-        terminators are ASCII, so ignoring a trailing partial code point never
-        hides one. The returned string is a strict decode of the full buffer.
+        Bytes are accumulated in place and framed on the raw buffer (all
+        terminators are ASCII, so a multibyte character split across two reads
+        cannot confuse it); the returned string is a strict decode of the frame.
 
         The timeout is one deadline for the whole response rather than a timer
         restarted by each partial read, so a server that trickles bytes cannot
@@ -1199,7 +1166,7 @@ class MygramClient:
         ``command`` is the frame that was sent: a SEARCH/COUNT header line
         reads identically whether or not a HIGHLIGHT/DEBUG body follows it,
         so completion has to be decided from the command rather than from
-        where a chunk happens to end (see :meth:`_is_response_complete`).
+        where a chunk happens to end (see :mod:`.framing`).
         """
         # Only reached from send_command, which guarantees a live connection.
         assert self._reader is not None
@@ -1207,11 +1174,7 @@ class MygramClient:
         deadline = time.monotonic() + self._command_timeout()
         max_response_bytes = self.config.max_response_bytes
 
-        is_search_or_count = _is_search_or_count_command(command)
-        expect_multiline_tail = is_search_or_count and (
-            self._debug_mode or _command_requests_highlight(command)
-        )
-        expect_debug_marker = is_search_or_count and self._debug_mode
+        frame = begin_response_frame(command, self._debug_mode)
 
         while True:
             remaining = deadline - time.monotonic()
@@ -1237,137 +1200,19 @@ class MygramClient:
                     f"({max_response_bytes}): received {len(buffer)} bytes"
                 )
 
-            # Check if response is complete (lenient probe on partial bytes).
-            probe = buffer.decode("utf-8", errors="ignore")
-            if self._is_response_complete(probe, expect_multiline_tail, expect_debug_marker):
-                return buffer.decode("utf-8")
-
-    # Multi-line response prefixes that terminate with "END\r\n" (or "END\n").
-    # Matched against the first line of the buffer; the suffix is the value
-    # ``True`` when the prefix is exact and ``False`` when a trailing payload
-    # (e.g. filepath after "OK DUMP_INFO ") is allowed.
-    _END_TERMINATED_PREFIXES = (
-        ("OK INFO", True),
-        ("OK REPLICATION", True),
-        ("OK CACHE_STATS", True),
-        ("OK DUMP_STATUS", True),
-        ("OK SYNC_STATUS", True),
-        ("OK DUMP_INFO", False),
-    )
-
-    def _is_response_complete(
-        self,
-        buffer: str,
-        expect_multiline_tail: bool = False,
-        expect_debug_marker: bool = False,
-    ) -> bool:
-        """
-        Check if buffer contains a complete response.
-
-        ``expect_multiline_tail``/``expect_debug_marker`` are set by
-        :meth:`_read_response` from the command that was sent, for the one
-        case the buffer's bytes alone cannot decide: a SEARCH/COUNT header
-        line reads identically whether or not a HIGHLIGHT/DEBUG body follows
-        it, so a chunk boundary landing right after that header, or right
-        after the debug block's own opening blank line (before ``# DEBUG``
-        itself has arrived), must not be mistaken for the frame's true end.
-        """
-        ends_with_blank = (
-            buffer.endswith("\n\n")
-            or buffer.endswith("\r\n\r\n")
-            or buffer.endswith("\n\r\n")
-        )
-
-        ends_with_end_marker = (
-            "\nEND\n" in buffer
-            or "\nEND\r\n" in buffer
-            or buffer.endswith("\nEND")
-            or buffer.endswith("\r\nEND")
-        )
-
-        # First-line prefix detection for END-terminated multi-line responses
-        # (INFO, REPLICATION, CACHE_STATS, DUMP_STATUS, DUMP_INFO).
-        first_line = self._extract_first_line(buffer)
-        if first_line is not None:
-            for prefix, exact in self._END_TERMINATED_PREFIXES:
-                if exact:
-                    if first_line == prefix:
-                        return ends_with_end_marker
-                else:
-                    # Prefix may be followed by a space + payload (e.g. filepath)
-                    if first_line == prefix or first_line.startswith(prefix + " "):
-                        return ends_with_end_marker
-
-        # SHOW VARIABLES (non-empty): a bare ASCII table with no OK/+OK/ERROR
-        # status prefix (spec/tcp-commands.md §13, item 1). Every border and
-        # row line ends in "\r\n" just like a lone first line would, so this
-        # must be told apart from a genuine single-line response before the
-        # generic fallback below.
-        if buffer.startswith("+-"):
-            return ends_with_blank
-
-        # FACET response (MygramDB v1.6+) - multi-line, terminated by blank line
-        if (buffer.startswith("OK FACET ")
-                or buffer.startswith("OK FACET\r")
-                or buffer.startswith("OK FACET\n")):
-            return ends_with_blank
-
-        if expect_multiline_tail:
-            # The DEBUG block's own opening ("\r\n\r\n# DEBUG\r\n") is itself
-            # a blank-line pattern; require the literal marker to have fully
-            # arrived before trusting "ends with a blank line" as the real
-            # terminator.
-            if expect_debug_marker and "# DEBUG\r\n" not in buffer:
-                return False
-            return ends_with_blank
-
-        # HIGHLIGHT response (MygramDB v1.6+) - SEARCH result with tab-prefixed
-        # snippet payload lines, terminated by blank line
-        if buffer.startswith("OK RESULTS ") and self._buffer_has_highlight_rows(buffer):
-            return ends_with_blank
-
-        # CONFIG (+OK ...) terminated by blank line
-        if buffer.startswith("+OK"):
-            return ends_with_blank
-
-        # Generic multi-line response terminator
-        if ends_with_blank:
-            return True
-
-        # Debug response
-        if "# DEBUG" in buffer:
-            return ends_with_blank
-
-        # Single-line response with newline
-        lines = buffer.split("\n")
-        if len(lines) > 1 and lines[-1] == "":
-            return True
-
-        return False
-
-    @staticmethod
-    def _extract_first_line(buffer: str) -> Optional[str]:
-        """Return the first line of the buffer (without CR/LF), or None."""
-        # Find first \r\n or \n
-        idx_crlf = buffer.find("\r\n")
-        idx_lf = buffer.find("\n")
-        if idx_crlf == -1 and idx_lf == -1:
-            return None
-        if idx_crlf != -1 and (idx_lf == -1 or idx_crlf <= idx_lf):
-            return buffer[:idx_crlf]
-        return buffer[:idx_lf]
-
-    @staticmethod
-    def _buffer_has_highlight_rows(buffer: str) -> bool:
-        """
-        Detect HIGHLIGHT-mode SEARCH responses by checking for tab-prefixed
-        payload lines after the count line. Classic single-line responses
-        never contain tabs.
-        """
-        first_line_end = buffer.find("\n")
-        if first_line_end < 0:
-            return False
-        return "\t" in buffer[first_line_end + 1:]
+            if is_response_complete(buffer, frame):
+                # Blank lines ahead of the status line belong to the previous
+                # reply (see :mod:`.framing`).
+                response = bytes(buffer[frame.frame_start:]).decode("utf-8")
+                # Mirror the server's per-connection DEBUG flag from the reply
+                # itself, so DEBUG ON/OFF sent through any API frames the next
+                # SEARCH/COUNT correctly.
+                reply = response.strip()
+                if reply == OK_DEBUG_ON:
+                    self._debug_mode = True
+                elif reply == OK_DEBUG_OFF:
+                    self._debug_mode = False
+                return response
 
     @staticmethod
     def _parse_search_response(response: str) -> SearchResponse:
@@ -1573,24 +1418,31 @@ class MygramClient:
         fields: Dict[str, str] = {}
         length = len(response)
         while pos < length:
-            while pos < length and response[pos] in " \t":
+            while pos < length and response[pos] in ASCII_WHITESPACE:
                 pos += 1
-            if pos >= length:
-                break
             key_start = pos
-            while pos < length and response[pos] != "=" and response[pos] not in " \t":
+            while (
+                pos < length
+                and response[pos] != "="
+                and response[pos] not in ASCII_WHITESPACE
+            ):
                 pos += 1
             if pos >= length or response[pos] != "=":
                 # No '=' before the next whitespace: not a key=value token.
                 continue
             key = response[key_start:pos]
             pos += 1  # skip '='
-            parsed = parse_wire_token(response, pos)
-            if parsed is None:
-                fields[key] = ""
-                break
-            value, pos = parsed
-            fields[key] = value
+
+            value = ""
+            # An empty value is always quoted on the wire, so a bare '=' before
+            # whitespace is an empty bare token.
+            if pos < length and response[pos] not in ASCII_WHITESPACE:
+                parsed = parse_wire_token(response, pos)
+                if parsed is None:
+                    raise ProtocolError(f"Malformed GET field value: {response}")
+                value, pos = parsed
+            if key:
+                fields[key] = value
 
         return Document(primary_key=primary_key, fields=fields)
 
