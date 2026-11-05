@@ -9,7 +9,7 @@
 #   MYGRAM_E2E_SEEDED=1 pytest tests/test_e2e.py
 #   docker compose -f tests/docker/docker-compose.yml down -v
 #
-# Override the server version with MYGRAMDB_VERSION (defaults to the v1.10 line)
+# Override the server version with MYGRAMDB_VERSION (defaults to the v1.12 line)
 # and the administrative token with MYGRAM_ADMIN_TOKEN.
 
 # The project name is declared here rather than inferred from the directory
@@ -36,6 +36,9 @@ services:
       - --gtid-mode=ON
       - --enforce-gtid-consistency=ON
       - --binlog-row-image=FULL
+      # v1.11+ reads column names from TABLE_MAP events and refuses a source
+      # that does not log full row metadata.
+      - --binlog-row-metadata=FULL
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
     volumes:
@@ -51,7 +54,7 @@ services:
       start_period: 30s
 
   mygramdb:
-    image: ghcr.io/libraz/mygram-db:${MYGRAMDB_VERSION:-1.10.2}
+    image: ghcr.io/libraz/mygram-db:${MYGRAMDB_VERSION:-1.12.0}
     depends_on:
       mysql:
         condition: service_healthy

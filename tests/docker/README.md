@@ -24,7 +24,7 @@ docker compose -f tests/docker/docker-compose.yml down -v
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `MYGRAMDB_VERSION` | `1.10.2` | Server image tag (`ghcr.io/libraz/mygram-db:<tag>`; e.g. `1.8.0`, `latest`) |
+| `MYGRAMDB_VERSION` | `1.12.0` | Server image tag (`ghcr.io/libraz/mygram-db:<tag>`; e.g. `1.8.0`, `latest`) |
 | `DB_FLAVOR` | `mysql` | `mysql` or `mariadb`; selects the compose file and seed database |
 | `MYSQL_VERSION` | `8.4` | MySQL image tag (used when `DB_FLAVOR=mysql`) |
 | `MARIADB_VERSION` | `11.8` | MariaDB image tag (used when `DB_FLAVOR=mariadb`) |
@@ -52,9 +52,10 @@ tests/docker/run-matrix.sh --only mysql:8.4,mariadb:11.8
 ```
 
 Targets (mirrors the server's own `e2e/run-matrix.sh`): `mysql:8.4`, `mysql:9.7`,
-`mariadb:10.11`, `mariadb:11.8`, `mariadb:12.3`. Every entry is a supported LTS;
-innovation releases are superseded by the next one a quarter later, so they are
-reached with `--only` rather than carried in the default list.
+`mysql:innovation`, `mariadb:10.11`, `mariadb:11.4`, `mariadb:11.8`,
+`mariadb:12.3`. Every supported LTS series of both flavors is listed, plus the
+current MySQL Innovation release through the floating `innovation` tag, which
+always names the current one and so never goes out of support between runs.
 
 ## Administrative authentication
 
