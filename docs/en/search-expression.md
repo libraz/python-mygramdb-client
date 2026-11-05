@@ -14,8 +14,12 @@ The search expression parser converts web-style search expressions into MygramDB
 | `+term` | Required term (must appear) | `+python` |
 | `-term` | Excluded term (must not appear) | `-deprecated` |
 | `"phrase"` | Quoted phrase (exact match) | `"machine learning"` |
-| `OR` | Logical OR between terms | `python OR ruby` |
+| `OR` | Logical OR between terms; implicit AND binds tighter | `python OR ruby` |
 | `(expr)` | Grouping | `+(tutorial OR guide)` |
+
+`OR` is an operator only as a whole token: delimited by whitespace, a parenthesis or a double quote on both sides, and not directly after a `+`/`-`. Terms that merely begin with it (`OR-tools`, `OR回路`) stay ordinary terms.
+
+An expression with a top-level `OR` is one group, because implicit AND binds tighter than `OR`: `a OR b c` converts to `(a OR b c)`, which is also what `(a OR b c)` means, so a bare expression and its parenthesized form are equivalent. Inside a group, `-` negates only the next operand and a nested group counts as one operand: `(a -(b c))` converts to `((a NOT (b c)))`.
 
 A term that collides with a clause keyword (`AND`, `OR`, `NOT`, `FILTER`, `SORT`, `LIMIT`, `OFFSET`, `HIGHLIGHT`, `FUZZY`, `FACET`, `ORDER`) is quoted automatically wherever the parser emits it onto the wire, so it matches as literal text instead of being read as an operator: `convert_search_expression('golang not')` produces `golang AND "not"`. A `+`/`-` inside a word (`COVID-19`, `e-mail`, `C++`) is left alone; only a `+`/`-` at a token boundary is an operator.
 
@@ -147,7 +151,7 @@ async def search_with_expression():
 The parser treats the same whitespace the server's own tokenizer does as a
 token boundary: ASCII whitespace plus Unicode whitespace such as the
 full-width space (U+3000) and no-break space (U+00A0), so CJK text with a
-full-width space between words splits into separate terms:
+full-width space between words splits into separate terms. The set is Unicode `White_Space`: U+0085, U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029, U+202F, U+205F and U+3000. U+200B (zero width space) is not whitespace:
 
 ```python
 expr = simplify_search_expression('日本語　検索')  # U+3000 full-width space
@@ -194,9 +198,12 @@ except ValueError as e:
 class SearchExpression:
     required_terms: List[str] = field(default_factory=list)  # + prefix and unprefixed terms (implicit AND)
     excluded_terms: List[str] = field(default_factory=list)  # Terms with - prefix
-    optional_terms: List[str] = field(default_factory=list)  # Unused; kept for source compatibility
     raw_expression: str = ""                                 # Formatted text for an OR/grouped sub-expression
+    required_is_group: List[bool] = field(default_factory=list)  # Parallel to required_terms: entry is a (...) group
+    excluded_is_group: List[bool] = field(default_factory=list)  # Parallel to excluded_terms: entry is a (...) group
 ```
+
+A `+(...)` / `-(...)` entry is flagged in `required_is_group` / `excluded_is_group` and emitted verbatim; any other entry is plain text and is quoted when converted. A quoted phrase that merely looks like a group (`"(a OR b)"`) is therefore still a literal phrase.
 
 ### SimplifiedExpression
 

@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The web-syntax expression parser follows MygramDB v1.12.0
+  - An expression with a top-level `OR` is one group: `a OR b c` converts to
+    `(a OR b c)`, and a bare expression is equivalent to its parenthesized form
+  - `SearchExpression.optional_terms` is removed; `required_is_group` and
+    `excluded_is_group` flag the `+(...)` / `-(...)` entries, so a quoted phrase
+    shaped like a group (`"(a OR b)"`) stays a literal phrase
+- Response framing is decided per command (new `mygramdb_client.framing`),
+  replacing the buffer-shape heuristics: a `FACET` reply, the full
+  `CONFIG HELP <path>` text and a `SEARCH` with a real `HIGHLIGHT` clause end
+  where the server's grammar says they do
+- `Document` parsing rejects a `GET` reply whose quoted field value is
+  malformed with `ProtocolError` instead of returning an empty value
+
+### Fixed
+
+- MygramDB v1.12.0 protocol
+  - A negated nested group inside a group (`(a -(b c))`) excludes the whole
+    group, and a dangling `-` no longer negates a later term
+  - A term beginning with `OR` (`OR-tools`, `OR回路`) is a term, not the
+    operator
+  - Whitespace follows Unicode `White_Space`: U+0085 is whitespace and is
+    quoted, U+200B is not
+  - Table, column, filter-key, facet-column and `SET` variable names containing
+    Unicode whitespace are rejected before they reach the wire
+  - A failing `SEARCH ... HIGHLIGHT` or `DEBUG ON` search returns its `ERROR`
+    at once, and a quoted term containing the word `highlight` no longer waits
+    for highlight rows
+  - `DEBUG ON` / `DEBUG OFF` sent through `send_command()` update the client's
+    DEBUG tracking, which resets when the connection closes
+  - `ErrorCode` gains `CONFIG_UNKNOWN_VARIABLE` (1008) and
+    `CONFIG_VARIABLE_NOT_MUTABLE` (1009)
+
+### Testing
+
+- The docker e2e stack defaults to the MygramDB 1.12.0 image, and both database
+  flavors start with `binlog_row_metadata=FULL`, which the server requires
+- The e2e matrix adds MySQL `innovation` and MariaDB 11.4
+
 ## [1.5.0] - 2026-09-28
 
 ### Changed

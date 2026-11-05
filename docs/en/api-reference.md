@@ -13,9 +13,10 @@ and backslashes escaped, when it is:
 - empty,
 - a reserved clause keyword case-insensitively (`AND`, `OR`, `NOT`, `FILTER`,
   `SORT`, `LIMIT`, `OFFSET`, `HIGHLIGHT`, `FUZZY`, `FACET`, `ORDER`),
-- or contains ASCII or Unicode whitespace (including the full-width space
-  U+3000 and no-break space U+00A0), a control character, `"`, `'`, `\`, `(`
-  or `)`.
+- or contains ASCII or Unicode whitespace (Unicode `White_Space`: U+0085,
+  U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029, U+202F, U+205F and the
+  full-width space U+3000; U+200B is not whitespace), a control character,
+  `"`, `'`, `\`, `(` or `)`.
 
 Callers pass raw, unescaped text; the client applies this decision
 automatically at every call site. A primary key returned by `search()`
@@ -279,7 +280,10 @@ Start binlog replication.
 async def enable_debug() -> None
 ```
 
-Enable debug mode for this connection.
+Enable debug mode for this connection. The client follows the connection's
+DEBUG state from the server's `OK DEBUG_ON` / `OK DEBUG_OFF` reply, so a
+`DEBUG ON` sent through `send_command()` frames the following `SEARCH` / `COUNT`
+replies the same way, and the state resets when the connection closes.
 
 #### disable_debug()
 
@@ -300,7 +304,11 @@ Send raw command to server.
 **Parameters:**
 - `command` - Command string (without CRLF terminator)
 
-**Returns:** Response string from server.
+**Returns:** Response string from server. Where a reply ends is decided per
+command (a `FACET` reply, the full `CONFIG HELP <path>` text, a `SEARCH` with a
+real `HIGHLIGHT` clause, the connection's DEBUG state), and an `ERROR` line
+ends any reply at once; a quoted term that merely contains the word `highlight`
+does not make the client wait for highlight rows.
 
 #### set_variable()
 
@@ -992,7 +1000,8 @@ the builtin or this library class.
 
 ### ProtocolError
 
-Raised when server returns an invalid response.
+Raised when server returns an invalid response, such as a `SEARCH` primary key
+or a `GET` field value whose quoted form is malformed.
 
 ### TimeoutError
 
@@ -1003,8 +1012,9 @@ on Python 3.11+ that is the same class as `asyncio.TimeoutError`, so
 ### InputValidationError
 
 Raised when input validation fails. Identifiers (table, primary key, sort
-column, filter key) are sent as bare tokens, so they may not contain
-whitespace, control characters, or a `"` / `'` / `\` delimiter. Free-form
+column, filter key, facet column, `SET` variable name) are sent as bare
+tokens, so they may not contain ASCII or Unicode whitespace, control
+characters, or a `"` / `'` / `\` delimiter. Free-form
 values (queries, terms, filter values) accept any of those except control
 characters and are quoted on the wire as needed.
 
@@ -1056,7 +1066,9 @@ limiting, or a long-running operation holding the table (error code
 
 ### ErrorCode
 
-Requires MygramDB 1.10 or later.
+Requires MygramDB 1.10 or later. The members mirror the server's error-code
+registry (`spec/error-codes.md`), including the `SET` rejections
+`CONFIG_UNKNOWN_VARIABLE` (1008) and `CONFIG_VARIABLE_NOT_MUTABLE` (1009).
 
 ```python
 class ErrorCode(IntEnum):

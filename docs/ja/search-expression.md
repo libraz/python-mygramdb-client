@@ -14,8 +14,12 @@
 | `+term` | 必須ターム（必ず含む） | `+python` |
 | `-term` | 除外ターム（含まない） | `-deprecated` |
 | `"phrase"` | クォート付きフレーズ（完全一致） | `"機械学習"` |
-| `OR` | 論理 OR | `python OR ruby` |
+| `OR` | 論理 OR（暗黙の AND のほうが強く結合する） | `python OR ruby` |
 | `(expr)` | グループ化 | `+(tutorial OR guide)` |
+
+`OR` が演算子になるのは単独のトークンのときだけです。前後が空白・括弧・二重引用符で区切られ、かつ `+`/`-` の直後ではない場合に限ります。`OR` で始まるだけのターム（`OR-tools`、`OR回路`）は通常のタームのままです。
+
+トップレベルに `OR` を含む式は全体で 1 つのグループになります。暗黙の AND が `OR` より強く結合するためです。`a OR b c` は `(a OR b c)` に変換され、これは `(a OR b c)` と書いた場合と同じ意味なので、括弧なしの式と括弧付きの式は等価です。グループ内の `-` は次のオペランドだけを否定し、ネストしたグループは 1 つのオペランドとして扱われます。`(a -(b c))` は `((a NOT (b c)))` に変換されます。
 
 句キーワード（`AND`、`OR`、`NOT`、`FILTER`、`SORT`、`LIMIT`、`OFFSET`、`HIGHLIGHT`、`FUZZY`、`FACET`、`ORDER`）と一致するタームは、パーサーがワイヤーに送り出す箇所で自動的にクォートされ、演算子としてではなくリテラルテキストとして一致します: `convert_search_expression('golang not')` は `golang AND "not"` になります。単語内の `+`/`-`（`COVID-19`、`e-mail`、`C++`）はそのまま扱われます。演算子として扱われるのはトークン境界にある `+`/`-` だけです。
 
@@ -148,7 +152,9 @@ async def search_with_expression():
 パーサーは、サーバー自身のトークナイザーと同じ空白をトークン境界として
 扱います。ASCII 空白に加え、全角スペース（U+3000）やノーブレークスペース
 （U+00A0）などの Unicode 空白も対象です。全角スペースで区切られた CJK
-テキストは別々のタームに分割されます:
+テキストは別々のタームに分割されます。対象は Unicode の `White_Space` で、
+U+0085、U+00A0、U+1680、U+2000〜U+200A、U+2028、U+2029、U+202F、U+205F、
+U+3000 です。U+200B（ゼロ幅スペース）は空白ではありません:
 
 ```python
 expr = simplify_search_expression('日本語　検索')  # U+3000 全角スペース
@@ -195,9 +201,12 @@ except ValueError as e:
 class SearchExpression:
     required_terms: List[str] = field(default_factory=list)  # + プレフィックス付きタームとプレフィックスなしターム（暗黙の AND）
     excluded_terms: List[str] = field(default_factory=list)  # - プレフィックス付きターム
-    optional_terms: List[str] = field(default_factory=list)  # 未使用。ソース互換性のために残されている
     raw_expression: str = ""                                 # OR / グループ化された部分式のフォーマット済みテキスト
+    required_is_group: List[bool] = field(default_factory=list)  # required_terms と並行: その要素が (...) グループか
+    excluded_is_group: List[bool] = field(default_factory=list)  # excluded_terms と並行: その要素が (...) グループか
 ```
+
+`+(...)` / `-(...)` の要素は `required_is_group` / `excluded_is_group` でグループと印が付き、そのまま出力されます。それ以外の要素はプレーンテキストで、変換時に必要に応じてクォートされます。そのため、グループに見えるだけのクォート付きフレーズ（`"(a OR b)"`）はリテラルフレーズのままです。
 
 ### SimplifiedExpression
 

@@ -10,8 +10,10 @@ mygramdb-client Python ライブラリの完全な API ドキュメントです�
 - 予約済みの句キーワードと大文字小文字を区別せず一致する場合（`AND`、
   `OR`、`NOT`、`FILTER`、`SORT`、`LIMIT`、`OFFSET`、`HIGHLIGHT`、`FUZZY`、
   `FACET`、`ORDER`）
-- ASCII または Unicode の空白（全角スペース U+3000 やノーブレークスペース
-  U+00A0 を含む）、制御文字、`"`、`'`、`\`、`(`、`)` のいずれかを含む場合
+- ASCII または Unicode の空白（Unicode の `White_Space`: U+0085、U+00A0、
+  U+1680、U+2000〜U+200A、U+2028、U+2029、U+202F、U+205F と全角スペース
+  U+3000。U+200B は空白ではありません）、制御文字、`"`、`'`、`\`、`(`、`)`
+  のいずれかを含む場合
 
 呼び出し側は生の、エスケープされていないテキストを渡すだけで、クライアント
 がすべての呼び出し箇所で自動的にこの判定を適用します。`search()` が返す
@@ -254,7 +256,10 @@ binlog レプリケーションを開始します。
 async def enable_debug() -> None
 ```
 
-この接続のデバッグモードを有効にします。
+この接続のデバッグモードを有効にします。クライアントはサーバーの
+`OK DEBUG_ON` / `OK DEBUG_OFF` の応答から接続の DEBUG 状態を追跡するため、
+`send_command()` で送った `DEBUG ON` も後続の `SEARCH` / `COUNT` の応答の
+区切り判定に反映されます。状態は接続を閉じるとリセットされます。
 
 #### disable_debug()
 
@@ -275,7 +280,11 @@ async def send_command(command: str) -> str
 **パラメータ:**
 - `command` - コマンド文字列（CRLF 終端なし）
 
-**戻り値:** サーバーからのレスポンス文字列。
+**戻り値:** サーバーからのレスポンス文字列。応答の終端はコマンドごとに判定
+されます（`FACET` の応答、`CONFIG HELP <path>` の全文、実際の `HIGHLIGHT`
+句を持つ `SEARCH`、接続の DEBUG 状態）。`ERROR` 行はどの応答もその場で終わら
+せます。`highlight` という語を含むだけのクォート付きタームのために、クライ
+アントがハイライト行を待ち続けることはありません。
 
 #### set_variable()
 
@@ -945,7 +954,8 @@ class MygramError(Exception):
 
 ### ProtocolError
 
-サーバーが不正なレスポンスを返した場合に発生します。
+サーバーが不正なレスポンスを返した場合に発生します。たとえば `SEARCH` の
+プライマリキーや `GET` のフィールド値で、クォート形式が壊れている場合です。
 
 ### TimeoutError
 
@@ -956,8 +966,9 @@ class MygramError(Exception):
 ### InputValidationError
 
 入力バリデーションに失敗した場合に発生します。識別子（テーブル、プライマリ
-キー、ソート列、フィルタキー）は引用符なしのトークンとして送信されるため、
-空白・制御文字・`"` / `'` / `\` の区切り文字を含められません。自由記述の値
+キー、ソート列、フィルタキー、FACET の列、`SET` の変数名）は引用符なしの
+トークンとして送信されるため、ASCII・Unicode の空白、制御文字、
+`"` / `'` / `\` の区切り文字を含められません。自由記述の値
 （クエリ、語、フィルタ値）は制御文字以外を受け付け、必要に応じてワイヤ上で
 引用されます。
 
@@ -1004,7 +1015,9 @@ MygramDB 1.10 以降が必要です。
 
 ### ErrorCode
 
-MygramDB 1.10 以降が必要です。
+MygramDB 1.10 以降が必要です。メンバーはサーバーのエラーコード登録表（`spec/error-codes.md`）に
+対応しており、`SET` の拒否を表す `CONFIG_UNKNOWN_VARIABLE`（1008）と
+`CONFIG_VARIABLE_NOT_MUTABLE`（1009）も含みます。
 
 ```python
 class ErrorCode(IntEnum):

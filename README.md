@@ -9,7 +9,7 @@
 
 Python client library for [MygramDB](https://github.com/libraz/mygram-db/) — a high-performance in-memory full-text search engine with MySQL replication support.
 
-**Server compatibility:** MygramDB 1.6 or later, with the protocol implemented through 1.10.2. A server rejects options it predates, and an older server's `ERROR` frames carry no numeric code; the [API reference](https://github.com/libraz/python-mygramdb-client/blob/main/docs/en/api-reference.md) marks each option that needs a newer server.
+**Server compatibility:** MygramDB 1.6 or later, with the protocol implemented through 1.12.0. A server rejects options it predates, and an older server's `ERROR` frames carry no numeric code; the [API reference](https://github.com/libraz/python-mygramdb-client/blob/main/docs/en/api-reference.md) marks each option that needs a newer server.
 
 <img src="https://raw.githubusercontent.com/libraz/python-mygramdb-client/main/docs/images/request-path.svg" alt="A search call passing from the application through the client's validation and wire-quoting steps to the MygramDB server over TCP, with the response decoded on the way back and MySQL feeding the server through binlog replication." width="960">
 
