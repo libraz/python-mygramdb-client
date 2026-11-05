@@ -32,7 +32,7 @@ class TestParseSearchExpression:
         result = parse_search_expression("golang")
         assert result.required_terms == ["golang"]
         assert result.excluded_terms == []
-        assert result.optional_terms == []
+        assert not hasattr(result, "optional_terms")
 
     def test_multiple_words_are_implicit_and(self):
         result = parse_search_expression("golang tutorial")
@@ -276,3 +276,95 @@ class TestSimplifySearchExpression:
     def test_required_with_or_subexpression_is_rejected(self):
         with pytest.raises(ValueError):
             simplify_search_expression("+golang (tutorial OR guide)")
+
+
+class TestTopLevelOr:
+    """An expression with a top-level OR is one group (implicit AND binds tighter)."""
+
+    @pytest.mark.parametrize(
+        "expression, expected",
+        [
+            ("a OR b c", "(a OR b c)"),
+            ("(a OR b c)", "((a OR b c))"),
+            ("a OR b c OR d", "(a OR b c OR d)"),
+            ("x a OR b", "(x a OR b)"),
+            ("a OR (b c) d", "(a OR (b c) d)"),
+        ],
+    )
+    def test_bare_or_expression_matches_its_parenthesized_form(
+        self, expression, expected
+    ):
+        assert convert_search_expression(expression) == expected
+
+    @pytest.mark.parametrize("expression", ["a OR b c", "a OR b c OR d", "x a OR b"])
+    def test_wrapped_form_carries_the_same_single_group(self, expression):
+        bare = parse_search_expression(expression)
+        wrapped = parse_search_expression(f"({expression})")
+        assert bare.required_terms == []
+        assert wrapped.raw_expression == f"({bare.raw_expression})"
+
+    @pytest.mark.parametrize("expression", ["OR a", "a OR OR b", "+ OR a", "a OR - b"])
+    def test_misplaced_or_is_rejected(self, expression):
+        with pytest.raises(ValueError):
+            convert_search_expression(expression)
+
+
+class TestGroupFlags:
+    """Prefixed groups are tagged structurally, never by their text shape."""
+
+    def test_quoted_phrase_shaped_like_a_group_stays_literal(self):
+        assert convert_search_expression('"(a OR b)"') == '"(a OR b)"'
+        parsed = parse_search_expression('"(beta)"')
+        assert not has_complex_expression(parsed)
+        assert simplify_search_expression('"(beta)"').main_term == "(beta)"
+        assert simplify_search_expression('foo -"(x)"').not_terms == ["(x)"]
+
+    def test_prefixed_group_is_tagged_structurally(self):
+        parsed = parse_search_expression("+golang +(tutorial OR guide) -(old)")
+        assert parsed.required_is_group == [False, True]
+        assert parsed.excluded_is_group == [True]
+        assert (
+            to_query_string(parsed)
+            == "golang AND (tutorial OR guide) AND NOT (old)"
+        )
+
+    def test_flags_run_parallel_to_term_lists(self):
+        parsed = parse_search_expression("a +b -c d")
+        assert parsed.required_terms == ["a", "b", "d"]
+        assert parsed.required_is_group == [False, False, False]
+        assert parsed.excluded_is_group == [False]
+
+
+class TestNegatedGroupInsideGroup:
+    """A minus negates only the next operand, and a nested group counts as one."""
+
+    def test_negated_nested_group_excludes_the_whole_group(self):
+        assert convert_search_expression("(a -(b c))") == "((a NOT (b c)))"
+
+    def test_dangling_minus_does_not_leak(self):
+        assert convert_search_expression("(a -) b") == "b AND ((a))"
+        assert convert_search_expression("(a - OR b)") == "((a OR b))"
+
+
+class TestOrOperatorBoundaries:
+    """OR is an operator only as a whole token."""
+
+    @pytest.mark.parametrize("term", ["OR-tools", "OR.", "or's", "OR回路"])
+    def test_term_beginning_with_or_is_not_the_operator(self, term):
+        parsed = parse_search_expression(term)
+        assert not has_complex_expression(parsed)
+        assert parsed.required_terms == [term]
+
+    def test_or_prefixed_terms_in_context(self):
+        assert convert_search_expression("python OR-tools") == "python AND OR-tools"
+        assert convert_search_expression("OR回路 入門") == "OR回路 AND 入門"
+
+    def test_fullwidth_space_delimits_the_operator(self):
+        assert convert_search_expression("python　OR　ruby") == "(python OR ruby)"
+
+    def test_operator_next_to_parentheses_and_quotes(self):
+        assert convert_search_expression("(a)OR(b)") == "((a) OR (b))"
+        assert convert_search_expression('"a"OR"b"') == "(a OR b)"
+
+    def test_or_after_a_prefix_is_a_plain_term(self):
+        assert parse_search_expression("+OR").required_terms == ["OR"]

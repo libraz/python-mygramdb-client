@@ -81,17 +81,14 @@ class TestSearchExpressionParsing:
         def test_parse_simple_terms(self):
             result = parse_search_expression("hello world")
 
-            # Unprefixed terms are required (implicit AND); optional_terms is
-            # unused, kept only for source compatibility.
+            # Unprefixed terms are required (implicit AND).
             assert result.required_terms == ["hello", "world"]
-            assert result.optional_terms == []
             assert result.excluded_terms == []
 
         def test_parse_required_terms_with_plus(self):
             result = parse_search_expression("+required1 +required2")
 
             assert result.required_terms == ["required1", "required2"]
-            assert result.optional_terms == []
 
         def test_parse_excluded_terms_with_minus(self):
             result = parse_search_expression("search -excluded")
