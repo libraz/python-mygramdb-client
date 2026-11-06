@@ -37,10 +37,10 @@ build-backend = "hatchling.build"
 [tool.rye]
 managed = true
 dev-dependencies = [
-    "flake8>=7.4.1",
-    "mypy>=2.3.1",
-    "pytest>=9.1.1",
-    "pytest-asyncio>=1.4.0",
+    "flake8>=7.5.0",
+    "mypy>=2.4.1",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.4.1.post1",
     "pytest-cov>=7.1.0",
 ]
 
