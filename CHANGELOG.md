@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-11-06
+
 ### Changed
 
 - The web-syntax expression parser follows MygramDB v1.12.0
@@ -369,7 +371,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Input validation and error handling
 - Full type hints with dataclasses
 
-[Unreleased]: https://github.com/libraz/python-mygramdb-client/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/libraz/python-mygramdb-client/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/libraz/python-mygramdb-client/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/libraz/python-mygramdb-client/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/libraz/python-mygramdb-client/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/libraz/python-mygramdb-client/compare/v1.2.1...v1.3.0
